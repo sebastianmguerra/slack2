@@ -1,133 +1,31 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Slack — Chat Personal</title>
+  <title>Slack — 1-on-1 Direct Chat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;0,900;1,400&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/slack.css" />
-  <!-- Supabase JS Client v2 -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
   <!-- ========================================================================
-       1. PANTALLA DE AUTENTICACIÓN (SOLO USUARIO Y CONTRASEÑA)
+       1. MAIN SLACK INTERFACE (NO LOGIN REQUIRED)
        ======================================================================== -->
-  <div id="auth-screen" class="auth-screen">
-    <div class="auth-container">
-      <div class="slack-brand-header">
-        <svg class="slack-logo-svg" viewBox="0 0 127 127" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M27.2 80c0 7.3-5.9 13.2-13.2 13.2C6.7 93.2.8 87.3.8 80c0-7.3 5.9-13.2 13.2-13.2h13.2V80zm6.6 0c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2v33c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V80z" fill="#E01E5A"/>
-          <path d="M47 27c-7.3 0-13.2-5.9-13.2-13.2C33.8 6.5 39.7.6 47 .6c7.3 0 13.2 5.9 13.2 13.2V27H47zm0 6.7c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H13.9C6.6 60.1.7 54.2.7 46.9c0-7.3 5.9-13.2 13.2-13.2H47z" fill="#36C5F0"/>
-          <path d="M99.9 46.9c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H99.9V46.9zm-6.6 0c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V13.8C66.9 6.5 72.8.6 80.1.6c7.3 0 13.2 5.9 13.2 13.2v33.1z" fill="#2EB67D"/>
-          <path d="M80.1 99.8c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V99.8h13.2zm0-6.6c-7.3 0-13.2-5.9-13.2-13.2 0-7.3 5.9-13.2 13.2-13.2h33.1c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H80.1z" fill="#ECB22E"/>
-        </svg>
-        <span class="slack-brand-title">slack</span>
-      </div>
-
-      <h1 id="auth-title" class="auth-heading">Inicia sesión en el chat</h1>
-      <p id="auth-subtitle" class="auth-subheading">Ingresa con tu usuario y contraseña para continuar</p>
-
-      <div class="auth-tabs">
-        <button type="button" id="tab-login" class="auth-tab active">Iniciar sesión</button>
-        <button type="button" id="tab-register" class="auth-tab">Crear cuenta</button>
-      </div>
-
-      <form id="auth-form" class="auth-form" autocomplete="on">
-        <!-- Campos exclusivos de registro: Foto de perfil y Nombre visible -->
-        <div id="register-extra-fields" class="hidden" style="display: flex; flex-direction: column; gap: 15px;">
-          <div class="form-group">
-            <label class="form-label">Foto de perfil</label>
-            <div class="avatar-picker-row">
-              <img id="reg-avatar-preview" class="avatar-preview-lg" src="" alt="Vista previa de avatar" />
-              <div class="avatar-picker-actions">
-                <div class="avatar-btn-group">
-                  <label class="btn-secondary-sm" for="reg-avatar-file">
-                    📷 Subir foto
-                  </label>
-                  <input type="file" id="reg-avatar-file" accept="image/*" class="hidden" />
-                  <button type="button" id="reg-avatar-url-btn" class="btn-secondary-sm">🔗 Pegar URL</button>
-                </div>
-                <div id="reg-preset-avatars" class="preset-avatars-strip"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label" for="reg-display-name">Nombre visible</label>
-            <input
-              type="text"
-              id="reg-display-name"
-              class="slack-input"
-              placeholder="Ej. Ana García"
-              maxlength="40"
-            />
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label" for="auth-username">Usuario</label>
-          <div class="input-with-prefix">
-            <span class="input-prefix">@</span>
-            <input
-              type="text"
-              id="auth-username"
-              class="slack-input has-prefix"
-              placeholder="tu_usuario"
-              required
-              autocomplete="username"
-              maxlength="30"
-            />
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label" for="auth-password">Contraseña</label>
-          <input
-            type="password"
-            id="auth-password"
-            class="slack-input"
-            placeholder="••••••••"
-            required
-            autocomplete="current-password"
-          />
-        </div>
-
-        <div id="auth-error-box" class="auth-error hidden"></div>
-
-        <button type="submit" id="auth-submit-btn" class="btn-slack-primary">
-          Iniciar sesión
-        </button>
-      </form>
-
-      <div class="auth-footer-status">
-        <span>Chat privado 1 a 1</span>
-        <button type="button" id="auth-db-pill" class="db-mode-pill" title="Configurar conexión a Supabase">
-          <span class="dot"></span>
-          <span id="auth-db-label">Conectando...</span>
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ========================================================================
-       2. INTERFAZ PRINCIPAL DE SLACK
-       ======================================================================== -->
-  <div id="slack-app" class="slack-app hidden">
-    <!-- Barra superior global (#350d36) -->
+  <div id="slack-app" class="slack-app">
+    <!-- Global Top Bar (#350d36) -->
     <header class="slack-topbar">
       <div class="topbar-left">
-        <button type="button" id="mobile-menu-toggle" class="mobile-menu-btn" title="Mostrar menú">
+        <button type="button" id="mobile-menu-toggle" class="mobile-menu-btn" title="Toggle sidebar">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
             <line x1="3" y1="6" x2="21" y2="6"></line>
             <line x1="3" y1="12" x2="21" y2="12"></line>
             <line x1="3" y1="18" x2="21" y2="18"></line>
           </svg>
         </button>
-        <button type="button" class="topbar-icon-btn" title="Historial">
+        <button type="button" class="topbar-icon-btn" title="History">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="9"></circle>
             <polyline points="12 7 12 12 15 15"></polyline>
@@ -145,27 +43,27 @@
             type="text"
             id="chat-search-input"
             class="slack-search-input"
-            placeholder="Buscar en la conversación..."
+            placeholder="Search in conversation..."
           />
-          <button type="button" id="chat-search-clear" class="search-clear-btn hidden" title="Limpiar búsqueda">✕</button>
+          <button type="button" id="chat-search-clear" class="search-clear-btn hidden" title="Clear search">✕</button>
         </div>
       </div>
 
       <div class="topbar-right">
-        <button type="button" id="topbar-db-btn" class="topbar-db-badge" title="Estado de base de datos en tiempo real">
+        <button type="button" id="topbar-switch-user-btn" class="topbar-db-badge" title="Switch between User 1 and User 2">
           <span class="status-dot"></span>
-          <span id="topbar-db-text">Supabase</span>
+          <span id="topbar-switch-user-text">Switch user</span>
         </button>
 
-        <button type="button" id="topbar-user-btn" class="topbar-user-btn" title="Editar tu perfil">
-          <img id="topbar-user-avatar" class="topbar-user-avatar" src="" alt="Mi perfil" />
+        <button type="button" id="topbar-user-btn" class="topbar-user-btn" title="Edit your profile">
+          <img id="topbar-user-avatar" class="topbar-user-avatar" src="" alt="My profile" />
           <span class="topbar-user-presence"></span>
         </button>
       </div>
     </header>
 
     <div class="slack-body">
-      <!-- Barra lateral izquierda (#3F0E40) -->
+      <!-- Left Sidebar (#3F0E40) -->
       <aside id="slack-sidebar" class="slack-sidebar">
         <div class="sidebar-workspace-header" id="workspace-header-btn">
           <div class="workspace-title-group">
@@ -174,7 +72,7 @@
               <polyline points="6 9 12 15 18 9"></polyline>
             </svg>
           </div>
-          <button type="button" id="sidebar-compose-focus-btn" class="workspace-compose-btn" title="Nuevo mensaje">
+          <button type="button" id="sidebar-compose-focus-btn" class="workspace-compose-btn" title="New message">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
@@ -186,20 +84,20 @@
           <div class="sidebar-section-header">
             <div class="sidebar-section-label">
               <span>▾</span>
-              <span>Mensajes directos</span>
+              <span>Direct messages</span>
             </div>
           </div>
 
           <div id="dm-users-list" class="dm-list">
-            <!-- Se llena dinámicamente con la otra persona del chat -->
+            <!-- Dynamically populated with the 1-on-1 participants -->
           </div>
         </div>
 
-        <!-- Tarjeta del usuario autenticado abajo a la izquierda -->
+        <!-- Current active user card at bottom-left -->
         <div class="sidebar-current-user">
-          <div id="sidebar-my-profile-trigger" class="sidebar-user-info" title="Haz clic para editar tu foto, nombre o usuario">
+          <div id="sidebar-my-profile-trigger" class="sidebar-user-info" title="Click to edit your photo, name or @username">
             <div class="sidebar-user-avatar-wrap">
-              <img id="sidebar-my-avatar" class="sidebar-user-avatar" src="" alt="Mi avatar" />
+              <img id="sidebar-my-avatar" class="sidebar-user-avatar" src="" alt="My avatar" />
               <span class="sidebar-user-online"></span>
             </div>
             <div class="sidebar-user-text">
@@ -209,66 +107,75 @@
           </div>
 
           <div class="sidebar-user-actions">
-            <button type="button" id="btn-open-edit-profile" class="sidebar-action-btn" title="Editar perfil">
+            <button type="button" id="btn-open-edit-profile" class="sidebar-action-btn" title="Edit your profile">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 20h9"></path>
                 <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
               </svg>
             </button>
-            <button type="button" id="btn-logout" class="sidebar-action-btn" title="Cerrar sesión">
+            <button type="button" id="btn-switch-user" class="sidebar-action-btn" title="Switch active user (User 1 ⇄ User 2)">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-                <polyline points="16 17 21 12 16 7"></polyline>
-                <line x1="21" y1="12" x2="9" y2="12"></line>
+                <polyline points="17 1 21 5 17 9"></polyline>
+                <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                <polyline points="7 23 3 19 7 15"></polyline>
+                <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
               </svg>
             </button>
           </div>
         </div>
       </aside>
 
-      <!-- Área central de conversación -->
+      <!-- Main Central Chat Area -->
       <main class="slack-main">
-        <!-- Cabecera de la conversación -->
+        <!-- Conversation Header -->
         <div class="chat-header">
-          <button type="button" id="chat-header-partner-btn" class="chat-partner-trigger" title="Ver perfil">
+          <button type="button" id="chat-header-partner-btn" class="chat-partner-trigger" title="View profile">
             <img id="chat-header-avatar" class="chat-header-avatar" src="" alt="Avatar" />
-            <span id="chat-header-name" class="chat-header-name">Cargando...</span>
-            <span id="chat-header-username" class="chat-header-username">@usuario</span>
+            <span id="chat-header-name" class="chat-header-name">Loading...</span>
+            <span id="chat-header-username" class="chat-header-username">@username</span>
             <span id="chat-header-presence" class="chat-header-presence"></span>
           </button>
 
           <div class="chat-header-actions">
-            <button type="button" id="btn-toggle-drawer" class="header-pill-btn">
+            <button type="button" id="btn-clear-chat" class="header-pill-btn" title="Clear all messages in this conversation">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+              </svg>
+              <span>Clear</span>
+            </button>
+
+            <button type="button" id="btn-toggle-drawer" class="header-pill-btn" title="Toggle profile panel">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                 <circle cx="12" cy="7" r="4"></circle>
               </svg>
-              <span>Perfil</span>
+              <span>Profile</span>
             </button>
           </div>
         </div>
 
-        <!-- Lista de mensajes -->
+        <!-- Messages Viewport -->
         <div id="messages-viewport" class="messages-viewport">
-          <!-- Cabecera de bienvenida del DM + Mensajes renderizados dinámicamente -->
+          <!-- DM Hero + Messages rendered dynamically -->
         </div>
 
-        <!-- Caja de texto de Slack (Composer) -->
+        <!-- Slack Message Composer -->
         <div class="composer-wrapper">
           <div class="slack-composer">
             <div class="composer-format-bar">
-              <button type="button" class="format-btn" data-format="bold" title="Negrita (*texto*)"><strong>B</strong></button>
-              <button type="button" class="format-btn" data-format="italic" title="Cursiva (_texto_)"><em>I</em></button>
-              <button type="button" class="format-btn" data-format="strike" title="Tachado (~texto~)"><span style="text-decoration: line-through;">S</span></button>
+              <button type="button" class="format-btn" data-format="bold" title="Bold (*text*)"><strong>B</strong></button>
+              <button type="button" class="format-btn" data-format="italic" title="Italic (_text_)"><em>I</em></button>
+              <button type="button" class="format-btn" data-format="strike" title="Strikethrough (~text~)"><span style="text-decoration: line-through;">S</span></button>
               <div class="format-divider"></div>
-              <button type="button" class="format-btn" data-format="code" title="Código en línea (`código`)">&lt;/&gt;</button>
-              <button type="button" class="format-btn" data-format="quote" title="Cita (&gt; texto)">❝</button>
+              <button type="button" class="format-btn" data-format="code" title="Inline code (`code`)">&lt;/&gt;</button>
+              <button type="button" class="format-btn" data-format="quote" title="Blockquote (&gt; text)">❝</button>
             </div>
 
             <div id="composer-attachment-preview" class="composer-attachment-preview hidden">
               <div class="attachment-thumb-box">
-                <img id="composer-attachment-img" class="attachment-thumb" src="" alt="Adjunto" />
-                <button type="button" id="composer-attachment-remove" class="attachment-remove-btn" title="Quitar imagen">✕</button>
+                <img id="composer-attachment-img" class="attachment-thumb" src="" alt="Attachment" />
+                <button type="button" id="composer-attachment-remove" class="attachment-remove-btn" title="Remove image">✕</button>
               </div>
             </div>
 
@@ -276,12 +183,12 @@
               id="composer-input"
               class="composer-textarea"
               rows="1"
-              placeholder="Enviar un mensaje..."
+              placeholder="Send a message..."
             ></textarea>
 
             <div class="composer-bottom-bar">
               <div class="composer-tools-left">
-                <label class="composer-icon-btn" for="composer-image-input" title="Adjuntar imagen">
+                <label class="composer-icon-btn" for="composer-image-input" title="Attach image">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                     <circle cx="8.5" cy="8.5" r="1.5"></circle>
@@ -290,14 +197,14 @@
                 </label>
                 <input type="file" id="composer-image-input" accept="image/*" class="hidden" />
 
-                <button type="button" id="btn-emoji-picker" class="composer-icon-btn" title="Insertar emoji">
+                <button type="button" id="btn-emoji-picker" class="composer-icon-btn" title="Insert emoji">
                   😊
                 </button>
 
                 <div id="emoji-popover" class="emoji-popover hidden"></div>
               </div>
 
-              <button type="button" id="btn-send-message" class="slack-send-btn" disabled title="Enviar mensaje (Enter)">
+              <button type="button" id="btn-send-message" class="slack-send-btn" disabled title="Send message (Enter)">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
                 </svg>
@@ -307,42 +214,46 @@
 
           <div class="typing-status-bar">
             <span id="typing-indicator-text"></span>
-            <span><strong>Enter</strong> para enviar · <strong>Shift + Enter</strong> para saltar línea</span>
+            <span><strong>Enter</strong> to send · <strong>Shift + Enter</strong> for new line</span>
           </div>
         </div>
       </main>
 
-      <!-- Panel lateral derecho de Perfil al estilo Slack -->
+      <!-- Right-Side Slack Profile Drawer -->
       <aside id="profile-drawer" class="slack-profile-drawer hidden">
         <div class="drawer-header">
-          <span>Perfil</span>
-          <button type="button" id="btn-close-drawer" class="drawer-close-btn" title="Cerrar panel">✕</button>
+          <span>Profile</span>
+          <button type="button" id="btn-close-drawer" class="drawer-close-btn" title="Close panel">✕</button>
         </div>
         <div class="drawer-body">
-          <img id="drawer-avatar" class="drawer-avatar-lg" src="" alt="Foto de perfil" />
-          <div id="drawer-name" class="drawer-display-name">Nombre</div>
-          <div id="drawer-username" class="drawer-username">@usuario</div>
+          <img id="drawer-avatar" class="drawer-avatar-lg" src="" alt="Profile photo" />
+          <div id="drawer-name" class="drawer-display-name">Name</div>
+          <div id="drawer-username" class="drawer-username">@username</div>
 
           <div class="drawer-status-row">
             <span id="drawer-presence-dot" class="chat-header-presence"></span>
-            <span id="drawer-presence-label">Activo</span>
+            <span id="drawer-presence-label">Active</span>
           </div>
 
-          <button type="button" id="drawer-edit-my-profile-btn" class="header-pill-btn hidden" style="margin-bottom: 16px;">
-            ✏️ Editar mi perfil
+          <button type="button" id="drawer-edit-profile-btn" class="header-pill-btn" style="margin-bottom: 16px;">
+            ✏️ Edit Profile
           </button>
 
           <div class="drawer-info-card">
             <div>
-              <div class="drawer-info-label">Nombre visible</div>
+              <div class="drawer-info-label">Display name</div>
               <div id="drawer-info-fullname" class="drawer-info-value"></div>
             </div>
             <div>
-              <div class="drawer-info-label">Usuario de Slack</div>
+              <div class="drawer-info-label">Username</div>
               <div id="drawer-info-handle" class="drawer-info-value"></div>
             </div>
             <div>
-              <div class="drawer-info-label">Hora local</div>
+              <div class="drawer-info-label">Status</div>
+              <div id="drawer-info-status" class="drawer-info-value"></div>
+            </div>
+            <div>
+              <div class="drawer-info-label">Local time</div>
               <div id="drawer-info-localtime" class="drawer-info-value"></div>
             </div>
           </div>
@@ -352,27 +263,27 @@
   </div>
 
   <!-- ========================================================================
-       3. MODAL: EDITAR TU PERFIL (FOTO, NOMBRE Y USUARIO)
+       2. MODAL: EDIT PROFILE (PHOTO, DISPLAY NAME, @USERNAME, STATUS)
        ======================================================================== -->
   <div id="edit-profile-modal" class="modal-backdrop hidden">
     <div class="slack-modal">
       <div class="modal-header">
-        <h2 class="modal-title">Editar tu perfil</h2>
+        <h2 id="edit-profile-modal-title" class="modal-title">Edit your profile</h2>
         <button type="button" id="btn-close-edit-profile" class="drawer-close-btn">✕</button>
       </div>
       <form id="edit-profile-form">
         <div class="modal-body">
           <div class="form-group">
-            <label class="form-label">Foto de perfil</label>
+            <label class="form-label">Profile photo</label>
             <div class="avatar-picker-row">
-              <img id="edit-avatar-preview" class="avatar-preview-lg" src="" alt="Mi foto" />
+              <img id="edit-avatar-preview" class="avatar-preview-lg" src="" alt="Profile photo" />
               <div class="avatar-picker-actions">
                 <div class="avatar-btn-group">
                   <label class="btn-secondary-sm" for="edit-avatar-file">
-                    📷 Subir nueva foto
+                    📷 Upload photo
                   </label>
                   <input type="file" id="edit-avatar-file" accept="image/*" class="hidden" />
-                  <button type="button" id="edit-avatar-url-btn" class="btn-secondary-sm">🔗 Pegar URL</button>
+                  <button type="button" id="edit-avatar-url-btn" class="btn-secondary-sm">🔗 Paste URL</button>
                 </div>
                 <div id="edit-preset-avatars" class="preset-avatars-strip"></div>
               </div>
@@ -380,19 +291,19 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="edit-display-name">Nombre completo / visible</label>
+            <label class="form-label" for="edit-display-name">Display name</label>
             <input
               type="text"
               id="edit-display-name"
               class="slack-input"
               required
               maxlength="40"
-              placeholder="Tu nombre visible"
+              placeholder="e.g. Alex Rivera"
             />
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="edit-username">Nombre de usuario (@usuario)</label>
+            <label class="form-label" for="edit-username">Username (@handle)</label>
             <div class="input-with-prefix">
               <span class="input-prefix">@</span>
               <input
@@ -401,18 +312,19 @@
                 class="slack-input has-prefix"
                 required
                 maxlength="30"
-                placeholder="tu_usuario"
+                placeholder="username"
               />
             </div>
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="edit-new-password">Cambiar contraseña (opcional)</label>
+            <label class="form-label" for="edit-status-text">Status</label>
             <input
-              type="password"
-              id="edit-new-password"
+              type="text"
+              id="edit-status-text"
               class="slack-input"
-              placeholder="Dejar en blanco para mantener la actual"
+              maxlength="60"
+              placeholder="e.g. Working remotely"
             />
           </div>
 
@@ -420,61 +332,13 @@
         </div>
 
         <div class="modal-footer">
-          <button type="button" id="btn-cancel-edit-profile" class="btn-modal-cancel">Cancelar</button>
-          <button type="submit" id="btn-save-edit-profile" class="btn-modal-save">Guardar cambios</button>
+          <button type="button" id="btn-cancel-edit-profile" class="btn-modal-cancel">Cancel</button>
+          <button type="submit" id="btn-save-edit-profile" class="btn-modal-save">Save Changes</button>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- ========================================================================
-       4. MODAL: CONEXIÓN A SUPABASE (PARA VERCEL O PRUEBA RÁPIDA)
-       ======================================================================== -->
-  <div id="supabase-config-modal" class="modal-backdrop hidden">
-    <div class="slack-modal">
-      <div class="modal-header">
-        <h2 class="modal-title">Conexión a Supabase Realtime</h2>
-        <button type="button" id="btn-close-supabase-modal" class="drawer-close-btn">✕</button>
-      </div>
-      <form id="supabase-config-form">
-        <div class="modal-body">
-          <p style="font-size: 13.5px; color: #616061; line-height: 1.45;">
-            Para que el chat funcione en producción en <strong>Vercel</strong> entre distintos dispositivos, conecta tu proyecto de Supabase (mediante variables de entorno en Vercel, editando <code>js/config.js</code> o pegándolas aquí).
-          </p>
-
-          <div class="form-group">
-            <label class="form-label" for="cfg-supabase-url">Project URL (SUPABASE_URL)</label>
-            <input
-              type="url"
-              id="cfg-supabase-url"
-              class="slack-input"
-              placeholder="https://xyzcompany.supabase.co"
-            />
-          </div>
-
-          <div class="form-group">
-            <label class="form-label" for="cfg-supabase-key">Anon Public Key (SUPABASE_ANON_KEY)</label>
-            <input
-              type="text"
-              id="cfg-supabase-key"
-              class="slack-input"
-              placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-            />
-          </div>
-
-          <div style="background: #f8f8f8; border: 1px solid #e2e2e2; border-radius: 6px; padding: 10px 12px; font-size: 12.5px; color: #454445;">
-            💡 <strong>Importante:</strong> Recuerda ejecutar una sola vez el archivo <code>supabase/schema.sql</code> en el <em>SQL Editor</em> de tu panel de Supabase para crear las tablas <code>slack_users</code> y <code>slack_messages</code>.
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" id="btn-clear-supabase-cfg" class="btn-modal-cancel">Usar Modo Local</button>
-          <button type="submit" class="btn-modal-save">Guardar y Conectar</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <script src="js/config.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

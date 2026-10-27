@@ -1,10 +1,6 @@
 {
-  "name": "slack-personal-chat",
-  "version": "1.0.0",
+  "name": "slack-1on1-chat",
+  "version": "2.0.0",
   "private": true,
-  "description": "Clon exacto de la UI de Slack para chat personal 1 a 1 con Supabase Realtime, listo para Vercel",
-  "scripts": {
-    "build": "node build-config.js",
-    "start": "npx serve ."
-  }
+  "description": "Simple 1-on-1 Slack UI Chat — Pure Vercel, Zero Login, Zero External Dependencies"
 }
