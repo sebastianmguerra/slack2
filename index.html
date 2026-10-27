@@ -12,9 +12,83 @@
 <body>
 
   <!-- ========================================================================
-       1. MAIN SLACK INTERFACE (NO LOGIN REQUIRED)
+       1. SIMPLE AUTHENTICATION SCREEN (USERNAME + PASSWORD + REMEMBER ME ONLY)
        ======================================================================== -->
-  <div id="slack-app" class="slack-app">
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-container">
+      <div class="slack-brand-header">
+        <svg class="slack-logo-svg" viewBox="0 0 127 127" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M27.2 80c0 7.3-5.9 13.2-13.2 13.2C6.7 93.2.8 87.3.8 80c0-7.3 5.9-13.2 13.2-13.2h13.2V80zm6.6 0c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2v33c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V80z" fill="#E01E5A"/>
+          <path d="M47 27c-7.3 0-13.2-5.9-13.2-13.2C33.8 6.5 39.7.6 47 .6c7.3 0 13.2 5.9 13.2 13.2V27H47zm0 6.7c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H13.9C6.6 60.1.7 54.2.7 46.9c0-7.3 5.9-13.2 13.2-13.2H47z" fill="#36C5F0"/>
+          <path d="M99.9 46.9c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H99.9V46.9zm-6.6 0c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V13.8C66.9 6.5 72.8.6 80.1.6c7.3 0 13.2 5.9 13.2 13.2v33.1z" fill="#2EB67D"/>
+          <path d="M80.1 99.8c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V99.8h13.2zm0-6.6c-7.3 0-13.2-5.9-13.2-13.2 0-7.3 5.9-13.2 13.2-13.2h33.1c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H80.1z" fill="#ECB22E"/>
+        </svg>
+        <span class="slack-brand-title">slack</span>
+      </div>
+
+      <h1 id="auth-title" class="auth-heading">Sign in to Slack</h1>
+      <p id="auth-subtitle" class="auth-subheading">Enter your username and password to continue</p>
+
+      <div class="auth-tabs">
+        <button type="button" id="tab-login" class="auth-tab active">Sign In</button>
+        <button type="button" id="tab-register" class="auth-tab">Create Account</button>
+      </div>
+
+      <form id="auth-form" class="auth-form" autocomplete="on">
+        <div class="form-group">
+          <label class="form-label" for="auth-username">Username</label>
+          <div class="input-with-prefix">
+            <span class="input-prefix">@</span>
+            <input
+              type="text"
+              id="auth-username"
+              class="slack-input has-prefix"
+              placeholder="your_username"
+              required
+              autocomplete="username"
+              maxlength="30"
+            />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="auth-password">Password</label>
+          <input
+            type="password"
+            id="auth-password"
+            class="slack-input"
+            placeholder="••••••••"
+            required
+            autocomplete="current-password"
+          />
+        </div>
+
+        <label style="display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; color: #454445; cursor: pointer; user-select: none; margin-top: 2px;">
+          <input type="checkbox" id="auth-remember" checked style="width: 16px; height: 16px; accent-color: #4a154b; cursor: pointer;" />
+          <span>Remember login on this device</span>
+        </label>
+
+        <div id="auth-error-box" class="auth-error hidden"></div>
+
+        <button type="submit" id="auth-submit-btn" class="btn-slack-primary">
+          Sign In
+        </button>
+      </form>
+
+      <div class="auth-footer-status">
+        <span>1-on-1 Private Chat</span>
+        <span class="db-mode-pill" style="cursor: default;">
+          <span class="dot"></span>
+          <span>IndexedDB + Vercel Sync</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       2. MAIN SLACK INTERFACE
+       ======================================================================== -->
+  <div id="slack-app" class="slack-app hidden">
     <!-- Global Top Bar (#350d36) -->
     <header class="slack-topbar">
       <div class="topbar-left">
@@ -50,9 +124,9 @@
       </div>
 
       <div class="topbar-right">
-        <button type="button" id="topbar-switch-user-btn" class="topbar-db-badge" title="Switch between User 1 and User 2">
+        <button type="button" id="topbar-edit-profile-btn" class="topbar-db-badge" title="Customize your photo, display name & @username">
           <span class="status-dot"></span>
-          <span id="topbar-switch-user-text">Switch user</span>
+          <span id="topbar-user-label">Edit Profile</span>
         </button>
 
         <button type="button" id="topbar-user-btn" class="topbar-user-btn" title="Edit your profile">
@@ -93,9 +167,9 @@
           </div>
         </div>
 
-        <!-- Current active user card at bottom-left -->
+        <!-- Current authenticated user card at bottom-left -->
         <div class="sidebar-current-user">
-          <div id="sidebar-my-profile-trigger" class="sidebar-user-info" title="Click to edit your photo, name or @username">
+          <div id="sidebar-my-profile-trigger" class="sidebar-user-info" title="Click to edit your photo, display name or @username">
             <div class="sidebar-user-avatar-wrap">
               <img id="sidebar-my-avatar" class="sidebar-user-avatar" src="" alt="My avatar" />
               <span class="sidebar-user-online"></span>
@@ -107,18 +181,17 @@
           </div>
 
           <div class="sidebar-user-actions">
-            <button type="button" id="btn-open-edit-profile" class="sidebar-action-btn" title="Edit your profile">
+            <button type="button" id="btn-open-edit-profile" class="sidebar-action-btn" title="Edit profile">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 20h9"></path>
                 <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
               </svg>
             </button>
-            <button type="button" id="btn-switch-user" class="sidebar-action-btn" title="Switch active user (User 1 ⇄ User 2)">
+            <button type="button" id="btn-logout" class="sidebar-action-btn" title="Sign out">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="17 1 21 5 17 9"></polyline>
-                <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-                <polyline points="7 23 3 19 7 15"></polyline>
-                <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                <polyline points="16 17 21 12 16 7"></polyline>
+                <line x1="21" y1="12" x2="9" y2="12"></line>
               </svg>
             </button>
           </div>
@@ -235,8 +308,8 @@
             <span id="drawer-presence-label">Active</span>
           </div>
 
-          <button type="button" id="drawer-edit-profile-btn" class="header-pill-btn" style="margin-bottom: 16px;">
-            ✏️ Edit Profile
+          <button type="button" id="drawer-edit-my-profile-btn" class="header-pill-btn hidden" style="margin-bottom: 16px;">
+            ✏️ Edit my profile
           </button>
 
           <div class="drawer-info-card">
@@ -263,12 +336,12 @@
   </div>
 
   <!-- ========================================================================
-       2. MODAL: EDIT PROFILE (PHOTO, DISPLAY NAME, @USERNAME, STATUS)
+       3. MODAL: EDIT YOUR PROFILE (PHOTO, DISPLAY NAME, @USERNAME, PASSWORD)
        ======================================================================== -->
   <div id="edit-profile-modal" class="modal-backdrop hidden">
     <div class="slack-modal">
       <div class="modal-header">
-        <h2 id="edit-profile-modal-title" class="modal-title">Edit your profile</h2>
+        <h2 class="modal-title">Edit your profile</h2>
         <button type="button" id="btn-close-edit-profile" class="drawer-close-btn">✕</button>
       </div>
       <form id="edit-profile-form">
@@ -276,7 +349,7 @@
           <div class="form-group">
             <label class="form-label">Profile photo</label>
             <div class="avatar-picker-row">
-              <img id="edit-avatar-preview" class="avatar-preview-lg" src="" alt="Profile photo" />
+              <img id="edit-avatar-preview" class="avatar-preview-lg" src="" alt="My photo" />
               <div class="avatar-picker-actions">
                 <div class="avatar-btn-group">
                   <label class="btn-secondary-sm" for="edit-avatar-file">
@@ -298,7 +371,7 @@
               class="slack-input"
               required
               maxlength="40"
-              placeholder="e.g. Alex Rivera"
+              placeholder="Your display name"
             />
           </div>
 
@@ -312,7 +385,7 @@
                 class="slack-input has-prefix"
                 required
                 maxlength="30"
-                placeholder="username"
+                placeholder="your_username"
               />
             </div>
           </div>
@@ -324,7 +397,17 @@
               id="edit-status-text"
               class="slack-input"
               maxlength="60"
-              placeholder="e.g. Working remotely"
+              placeholder="e.g. Active in Slack"
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="edit-new-password">Change password (optional)</label>
+            <input
+              type="password"
+              id="edit-new-password"
+              class="slack-input"
+              placeholder="Leave blank to keep current password"
             />
           </div>
 

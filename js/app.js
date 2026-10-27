@@ -1,16 +1,20 @@
 // ============================================================================
-// SLACK 1-ON-1 DIRECT CHAT — PURE VERCEL + LOCAL REALTIME (NO LOGIN, ENGLISH UI)
+// SLACK 1-ON-1 DIRECT CHAT — ENGLISH UI, SIMPLE LOGIN, INDEXEDDB + VERCEL SYNC
 // ============================================================================
 
 (function () {
   "use strict";
 
   const STORAGE_KEYS = {
-    ACTIVE_SEAT_LOCAL: "slack_v2_my_seat_id",
-    ACTIVE_SEAT_SESSION: "slack_v2_session_seat_id",
-    ACTIVE_PARTNER_SESSION: "slack_v2_partner_id",
-    STORE_CACHE: "slack_v2_store_cache"
+    REMEMBER_UID_LOCAL: "slack_v3_remembered_uid",
+    SESSION_UID_TAB: "slack_v3_session_uid",
+    ACTIVE_PARTNER_ID: "slack_v3_active_partner_id",
+    FALLBACK_STORE: "slack_v3_fallback_store"
   };
+
+  const IDB_NAME = "slack_1on1_idb_v3";
+  const IDB_STORE = "kv";
+  const IDB_KEY = "chat_state";
 
   const SLACK_AVATAR_COLORS = [
     { bg: "#E01E5A", fg: "#FFFFFF" },
@@ -28,7 +32,7 @@
   ];
 
   // ==========================================================================
-  // 1. UTILITIES (SVG AVATARS, IMAGE COMPRESSION, SLACK MARKDOWN FORMATTER)
+  // 1. UTILITIES (AVATARS, IMAGE COMPRESSION, PASSWORD HASH, SLACK MARKDOWN)
   // ==========================================================================
 
   function escapeHtml(str) {
@@ -44,7 +48,7 @@
     const clean = (label || "U").trim();
     const initials =
       clean
-        .split(/\s+/)
+        .split(/[\s_]+/)
         .map((w) => w[0])
         .join("")
         .slice(0, 2)
@@ -114,6 +118,28 @@
     });
   }
 
+  async function hashPassword(password, usernameSalt) {
+    const raw = `slack_v3:${usernameSalt.toLowerCase()}:${password}`;
+    if (window.crypto && window.crypto.subtle) {
+      try {
+        const msgBuffer = new TextEncoder().encode(raw);
+        const hashBuffer = await window.crypto.subtle.digest("SHA-256", msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+      } catch (_) {}
+    }
+    let h1 = 0xdeadbeef ^ raw.length;
+    let h2 = 0x41c6ce57 ^ raw.length;
+    for (let i = 0, ch; i < raw.length; i++) {
+      ch = raw.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+  }
+
   function normalizeUsername(input) {
     return (input || "")
       .trim()
@@ -126,28 +152,15 @@
     if (!text) return "";
     let html = escapeHtml(text);
 
-    // Code blocks ```code```
     html = html.replace(/```([\s\S]*?)```/g, (_, code) => `<pre>${code.trim()}</pre>`);
-
-    // Inline code `code`
     html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-
-    // Links http/https
     html = html.replace(
       /(https?:\/\/[^\s<]+)/g,
       '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
     );
-
-    // Bold *text*
     html = html.replace(/(^|\s)\*([^*\n]+)\*(?=\s|$|[.,!?])/g, "$1<strong>$2</strong>");
-
-    // Italic _text_
     html = html.replace(/(^|\s)_([^_\n]+)_(?=\s|$|[.,!?])/g, "$1<em>$2</em>");
-
-    // Strikethrough ~text~
     html = html.replace(/(^|\s)~([^~\n]+)~(?=\s|$|[.,!?])/g, "$1<del>$2</del>");
-
-    // Blockquote > text
     html = html.replace(/(^|\n)&gt;\s?([^\n]+)/g, "$1<blockquote>$2</blockquote>");
 
     return html;
@@ -191,49 +204,91 @@
     });
   }
 
-  // ==========================================================================
-  // 2. APPLICATION STATE & DEFAULT 1-ON-1 PARTICIPANTS
-  // ==========================================================================
-
-  function createDefaultStore() {
-    const nowIso = new Date().toISOString();
-    return {
-      clearedAt: 0,
-      deletedIds: [],
-      users: {
-        user_1: {
-          id: "user_1",
-          username: "alex",
-          display_name: "Alex Rivera",
-          status_text: "Active in Slack",
-          avatar_url: createSvgAvatarDataUrl("Alex Rivera", 0),
-          updated_at: 1000,
-          last_seen: nowIso
-        },
-        user_2: {
-          id: "user_2",
-          username: "sam",
-          display_name: "Sam Taylor",
-          status_text: "Available for DM",
-          avatar_url: createSvgAvatarDataUrl("Sam Taylor", 1),
-          updated_at: 1000,
-          last_seen: nowIso
-        }
-      },
-      messages: []
-    };
+  // Deterministic ID per username so the same account matches across devices
+  function deterministicUserId(username) {
+    const clean = normalizeUsername(username);
+    return `usr_${clean}`;
   }
 
+  // ==========================================================================
+  // 2. HIGH-CAPACITY INDEXEDDB STORAGE ENGINE (HUNDREDS OF MBs)
+  // ==========================================================================
+
+  function openIdb() {
+    return new Promise((resolve, reject) => {
+      if (!("indexedDB" in window)) {
+        reject(new Error("IndexedDB not supported"));
+        return;
+      }
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbLoadStore() {
+    try {
+      const db = await openIdb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, "readonly");
+        const store = tx.objectStore(IDB_STORE);
+        const getReq = store.get(IDB_KEY);
+        getReq.onsuccess = () => resolve(getReq.result || null);
+        getReq.onerror = () => reject(getReq.error);
+      });
+    } catch (_) {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEYS.FALLBACK_STORE);
+        return raw ? JSON.parse(raw) : null;
+      } catch (__) {
+        return null;
+      }
+    }
+  }
+
+  async function idbSaveStore(storeObj) {
+    try {
+      const db = await openIdb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, "readwrite");
+        const store = tx.objectStore(IDB_STORE);
+        store.put(storeObj, IDB_KEY);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (_) {
+      try {
+        localStorage.setItem(STORAGE_KEYS.FALLBACK_STORE, JSON.stringify(storeObj));
+      } catch (__) {}
+    }
+  }
+
+  // ==========================================================================
+  // 3. STATE & VERCEL SERVERLESS DELTA-SYNC (/api/chat)
+  // ==========================================================================
+
   const state = {
-    myUserId: "user_1",
-    activePartnerId: "user_2",
-    store: createDefaultStore(),
+    authTab: "login", // "login" | "register"
+    currentUser: null,
+    activePartnerId: null,
+
+    store: {
+      clearedAt: 0,
+      deletedIds: [],
+      users: {},
+      messages: []
+    },
 
     searchQuery: "",
     pendingAttachment: null,
     drawerOpen: false,
     drawerUserId: null,
-    editingUserId: null,
     editAvatarDataUrl: "",
 
     localChannel: null,
@@ -243,81 +298,34 @@
     syncInFlight: false
   };
 
-  function getMyUser() {
-    return state.store.users[state.myUserId] || state.store.users.user_1;
-  }
+  function getSafeSnapshotForVercel() {
+    // Keep snapshot safely under Vercel's 4.5 MB limit (~3.2 MB max)
+    const users = state.store.users;
+    const allMsgs = state.store.messages || [];
+    const selectedMsgs = [];
+    let bytes = JSON.stringify(users).length;
 
-  function getOtherSeatId(uid) {
-    return uid === "user_1" ? "user_2" : "user_1";
-  }
-
-  function getActivePartner() {
-    return (
-      state.store.users[state.activePartnerId] ||
-      state.store.users[getOtherSeatId(state.myUserId)] ||
-      getMyUser()
-    );
-  }
-
-  // ==========================================================================
-  // 3. LOCAL PERSISTENCE + PURE VERCEL SERVERLESS SYNC (/api/chat)
-  // ==========================================================================
-
-  function loadLocalCache() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.STORE_CACHE);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.users && parsed.users.user_1 && parsed.users.user_2) {
-          state.store = {
-            clearedAt: parsed.clearedAt || 0,
-            deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
-            users: parsed.users,
-            messages: Array.isArray(parsed.messages) ? parsed.messages : []
-          };
-        }
+    for (let i = allMsgs.length - 1; i >= 0; i--) {
+      const m = allMsgs[i];
+      const msgSize = JSON.stringify(m).length;
+      if (bytes + msgSize < 3200000) {
+        selectedMsgs.unshift(m);
+        bytes += msgSize;
+      } else {
+        // Include message text without heavy image if needed
+        const lightMsg = { ...m, image_url: null };
+        selectedMsgs.unshift(lightMsg);
+        bytes += JSON.stringify(lightMsg).length;
       }
-    } catch (_) {}
-
-    // Resolve seat from URL (?user=2), sessionStorage, or localStorage
-    const params = new URLSearchParams(window.location.search);
-    const urlUser = params.get("user");
-    const sessionSeat = sessionStorage.getItem(STORAGE_KEYS.ACTIVE_SEAT_SESSION);
-    const localSeat = localStorage.getItem(STORAGE_KEYS.ACTIVE_SEAT_LOCAL);
-
-    if (urlUser === "2" || urlUser === "user_2") {
-      state.myUserId = "user_2";
-    } else if (urlUser === "1" || urlUser === "user_1") {
-      state.myUserId = "user_1";
-    } else if (sessionSeat === "user_1" || sessionSeat === "user_2") {
-      state.myUserId = sessionSeat;
-    } else if (localSeat === "user_1" || localSeat === "user_2") {
-      state.myUserId = localSeat;
-    } else {
-      state.myUserId = "user_1";
+      if (selectedMsgs.length >= 400) break;
     }
 
-    sessionStorage.setItem(STORAGE_KEYS.ACTIVE_SEAT_SESSION, state.myUserId);
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_SEAT_LOCAL, state.myUserId);
-
-    const savedPartner = sessionStorage.getItem(STORAGE_KEYS.ACTIVE_PARTNER_SESSION);
-    if (savedPartner === "user_1" || savedPartner === "user_2") {
-      state.activePartnerId = savedPartner;
-    } else {
-      state.activePartnerId = getOtherSeatId(state.myUserId);
-    }
-  }
-
-  function saveLocalCache(notifyTabs = true) {
-    try {
-      localStorage.setItem(STORAGE_KEYS.STORE_CACHE, JSON.stringify(state.store));
-      if (notifyTabs && state.localChannel) {
-        state.localChannel.postMessage({
-          type: "STORE_SYNC",
-          store: state.store
-        });
-      }
-    } catch (_) {}
+    return {
+      clearedAt: state.store.clearedAt || 0,
+      deletedIds: (state.store.deletedIds || []).slice(-500),
+      users,
+      messages: selectedMsgs
+    };
   }
 
   function applyIncomingState(incoming) {
@@ -335,7 +343,7 @@
     if (Array.isArray(incoming.deletedIds) && incoming.deletedIds.length > 0) {
       const prevLen = (state.store.deletedIds || []).length;
       const delSet = new Set([...(state.store.deletedIds || []), ...incoming.deletedIds]);
-      state.store.deletedIds = Array.from(delSet).slice(-500);
+      state.store.deletedIds = Array.from(delSet).slice(-1000);
       const beforeMsgLen = state.store.messages.length;
       state.store.messages = state.store.messages.filter((m) => !delSet.has(m.id));
       if (state.store.deletedIds.length !== prevLen || state.store.messages.length !== beforeMsgLen) {
@@ -343,7 +351,6 @@
       }
     }
 
-    // Merge users (accept either array or object map)
     const incomingUsersList = Array.isArray(incoming.users)
       ? incoming.users
       : incoming.users && typeof incoming.users === "object"
@@ -351,10 +358,11 @@
       : [];
 
     for (const u of incomingUsersList) {
-      if (!u || !u.id || !state.store.users[u.id]) continue;
+      if (!u || !u.id || !u.username) continue;
       const cur = state.store.users[u.id];
-      if ((u.updated_at || 0) >= (cur.updated_at || 0)) {
+      if (!cur || (u.updated_at || 0) >= (cur.updated_at || 0)) {
         if (
+          !cur ||
           cur.display_name !== u.display_name ||
           cur.username !== u.username ||
           cur.avatar_url !== u.avatar_url ||
@@ -364,13 +372,12 @@
           changed = true;
         }
         state.store.users[u.id] = {
-          ...cur,
+          ...(cur || {}),
           ...u
         };
       }
     }
 
-    // Merge messages
     if (Array.isArray(incoming.messages)) {
       const delSet = new Set(state.store.deletedIds || []);
       const byId = new Map();
@@ -392,7 +399,11 @@
           if (JSON.stringify(existing.reactions) !== JSON.stringify(m.reactions)) {
             changed = true;
           }
-          byId.set(m.id, m);
+          // Preserve local image if server had stripped it
+          byId.set(m.id, {
+            ...m,
+            image_url: m.image_url || existing.image_url
+          });
         }
       }
 
@@ -402,14 +413,17 @@
 
       state.store.messages = Array.from(byId.values())
         .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-        .slice(-400);
+        .slice(-1000);
     }
 
-    // Check typing indicator from the active partner
-    if (incoming.typing && typeof incoming.typing === "object") {
-      const partnerId = state.activePartnerId;
-      if (partnerId !== state.myUserId && incoming.typing[partnerId]) {
-        const t = incoming.typing[partnerId];
+    if (state.currentUser && state.store.users[state.currentUser.id]) {
+      state.currentUser = state.store.users[state.currentUser.id];
+    }
+
+    if (incoming.typing && typeof incoming.typing === "object" && state.currentUser) {
+      const partner = getActivePartner();
+      if (partner && partner.id !== state.currentUser.id && incoming.typing[partner.id]) {
+        const t = incoming.typing[partner.id];
         if (Date.now() - (t.timestamp || 0) < 3500) {
           showPartnerTyping(t.displayName);
         }
@@ -417,101 +431,112 @@
     }
 
     if (changed) {
-      saveLocalCache(false);
+      idbSaveStore(state.store);
     }
     return changed;
   }
 
-  async function callVercelApi(payload) {
-    if (window.location.protocol === "file:") return null;
+  async function persistAndBroadcast() {
+    await idbSaveStore(state.store);
+    if (state.localChannel) {
+      state.localChannel.postMessage({
+        type: "STORE_SYNC",
+        store: state.store
+      });
+    }
+  }
+
+  async function callVercelApi(payload, includeSnapshot = false) {
+    if (window.location.protocol === "file:") return { ok: true, localOnly: true };
     try {
+      const bodyObj = {
+        ...payload,
+        activeUserId: state.currentUser ? state.currentUser.id : null
+      };
+      if (includeSnapshot) {
+        bodyObj.snapshot = getSafeSnapshotForVercel();
+      }
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...payload,
-          activeUserId: state.myUserId,
-          snapshot: {
-            clearedAt: state.store.clearedAt || 0,
-            deletedIds: state.store.deletedIds || [],
-            users: state.store.users,
-            messages: state.store.messages
-          }
-        })
+        body: JSON.stringify(bodyObj)
       });
-      if (!res.ok) return null;
       const data = await res.json();
       if (data && data.ok) {
+        const serverUserCount = Array.isArray(data.users) ? data.users.length : 0;
+        const localUserCount = Object.keys(state.store.users).length;
+        const serverMsgCount = Array.isArray(data.messages) ? data.messages.length : 0;
+        const localMsgCount = state.store.messages.length;
+
         const changed = applyIncomingState(data);
-        if (changed) {
+        if (changed && state.currentUser) {
+          selectDefaultPartnerIfNeeded();
           renderAll(true);
+        }
+
+        // If Vercel instance cold-started and has fewer users/messages than our IndexedDB, re-hydrate it
+        if (!includeSnapshot && (serverUserCount < localUserCount || serverMsgCount < localMsgCount)) {
+          await callVercelApi({ action: "sync" }, true);
         }
       }
       return data;
     } catch (_) {
-      return null;
+      return { ok: true, localOnly: true };
     }
   }
 
   function startRealtimeSync() {
     if ("BroadcastChannel" in window && !state.localChannel) {
-      state.localChannel = new BroadcastChannel("slack_1on1_pure_v2");
+      state.localChannel = new BroadcastChannel("slack_1on1_idb_channel_v3");
       state.localChannel.onmessage = (event) => {
         const data = event.data || {};
         if (data.type === "STORE_SYNC" && data.store) {
           const changed = applyIncomingState(data.store);
-          if (changed) renderAll(true);
-        } else if (data.type === "TYPING") {
-          if (data.userId !== state.myUserId && data.userId === state.activePartnerId) {
+          if (changed && state.currentUser) {
+            selectDefaultPartnerIfNeeded();
+            renderAll(true);
+          }
+        } else if (data.type === "TYPING" && state.currentUser) {
+          if (data.userId !== state.currentUser.id && data.userId === state.activePartnerId) {
             showPartnerTyping(data.displayName);
           }
         }
       };
     }
 
-    window.addEventListener("storage", (e) => {
-      if (e.key === STORAGE_KEYS.STORE_CACHE && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          if (applyIncomingState(parsed)) {
-            renderAll(true);
-          }
-        } catch (_) {}
-      }
-    });
-
-    // Initial sync with Vercel /api/chat + fast 1.2s polling
-    callVercelApi({ action: "sync" });
     if (state.pollTimer) clearInterval(state.pollTimer);
     state.pollTimer = setInterval(async () => {
-      if (document.hidden || state.syncInFlight) return;
+      if (document.hidden || state.syncInFlight || !state.currentUser) return;
       state.syncInFlight = true;
       try {
-        await callVercelApi({ action: "sync" });
+        await callVercelApi({ action: "sync" }, false);
       } finally {
         state.syncInFlight = false;
       }
-    }, 1200);
+    }, 1300);
   }
 
   function sendTypingSignal() {
+    if (!state.currentUser) return;
     const now = Date.now();
     if (now - state.lastTypingSentAt < 900) return;
     state.lastTypingSentAt = now;
 
-    const me = getMyUser();
     if (state.localChannel) {
       state.localChannel.postMessage({
         type: "TYPING",
-        userId: me.id,
-        displayName: me.display_name
+        userId: state.currentUser.id,
+        displayName: state.currentUser.display_name
       });
     }
-    callVercelApi({
-      action: "typing",
-      userId: me.id,
-      displayName: me.display_name
-    });
+    callVercelApi(
+      {
+        action: "typing",
+        userId: state.currentUser.id,
+        displayName: state.currentUser.display_name
+      },
+      false
+    );
   }
 
   function showPartnerTyping(displayName) {
@@ -526,40 +551,230 @@
 
   function isUserOnline(user) {
     if (!user) return false;
-    if (user.id === state.myUserId) return true;
+    if (state.currentUser && user.id === state.currentUser.id) return true;
     if (user.last_seen) {
       const diff = Date.now() - new Date(user.last_seen).getTime();
-      if (diff < 60000) return true;
+      if (diff < 65000) return true;
     }
-    return true;
+    return false;
   }
 
   // ==========================================================================
-  // 4. SWITCHING ACTIVE USER (USER 1 ⇄ USER 2)
+  // 4. SIMPLE AUTHENTICATION (USERNAME + PASSWORD + REMEMBER ME)
   // ==========================================================================
 
-  function switchActiveUserSeat() {
-    const previousMe = state.myUserId;
-    state.myUserId = getOtherSeatId(previousMe);
-    state.activePartnerId = previousMe;
+  function switchAuthTab(tab) {
+    state.authTab = tab;
+    const tabLogin = document.getElementById("tab-login");
+    const tabRegister = document.getElementById("tab-register");
+    const title = document.getElementById("auth-title");
+    const subtitle = document.getElementById("auth-subtitle");
+    const submitBtn = document.getElementById("auth-submit-btn");
+    const errorBox = document.getElementById("auth-error-box");
 
-    sessionStorage.setItem(STORAGE_KEYS.ACTIVE_SEAT_SESSION, state.myUserId);
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_SEAT_LOCAL, state.myUserId);
-    sessionStorage.setItem(STORAGE_KEYS.ACTIVE_PARTNER_SESSION, state.activePartnerId);
+    errorBox.classList.add("hidden");
 
-    if (state.drawerOpen) {
-      state.drawerUserId = state.activePartnerId;
+    if (tab === "login") {
+      tabLogin.classList.add("active");
+      tabRegister.classList.remove("active");
+      title.textContent = "Sign in to Slack";
+      subtitle.textContent = "Enter your username and password to continue";
+      submitBtn.textContent = "Sign In";
+    } else {
+      tabRegister.classList.add("active");
+      tabLogin.classList.remove("active");
+      title.textContent = "Create your account";
+      subtitle.textContent = "Choose a username and password — nothing else required";
+      submitBtn.textContent = "Create Account & Enter";
+    }
+  }
+
+  function showAuthError(msg) {
+    const errorBox = document.getElementById("auth-error-box");
+    errorBox.textContent = msg;
+    errorBox.classList.remove("hidden");
+  }
+
+  async function handleAuthSubmit(e) {
+    e.preventDefault();
+    const errorBox = document.getElementById("auth-error-box");
+    errorBox.classList.add("hidden");
+
+    const rawUsername = document.getElementById("auth-username").value;
+    const password = document.getElementById("auth-password").value;
+    const rememberMe = document.getElementById("auth-remember").checked;
+    const username = normalizeUsername(rawUsername);
+
+    if (!username || username.length < 2) {
+      showAuthError("Please enter a valid username (at least 2 characters).");
+      return;
+    }
+    if (!password || password.length < 3) {
+      showAuthError("Please enter a password (at least 3 characters).");
+      return;
     }
 
+    const submitBtn = document.getElementById("auth-submit-btn");
+    submitBtn.disabled = true;
+
+    try {
+      // Sync latest accounts from server first
+      await callVercelApi({ action: "sync" }, true);
+
+      const passwordHash = await hashPassword(password, username);
+      const userId = deterministicUserId(username);
+
+      if (state.authTab === "login") {
+        const localUser = Object.values(state.store.users).find(
+          (u) => normalizeUsername(u.username) === username
+        );
+
+        const apiRes = await callVercelApi(
+          {
+            action: "login",
+            username,
+            password_hash: passwordHash
+          },
+          true
+        );
+
+        const resolvedUser =
+          Object.values(state.store.users).find(
+            (u) => normalizeUsername(u.username) === username
+          ) || localUser;
+
+        if (!resolvedUser) {
+          showAuthError(
+            (apiRes && apiRes.error) ||
+              `Account @${username} not found. Switch to "Create Account" to create it.`
+          );
+          return;
+        }
+
+        if (resolvedUser.password_hash && resolvedUser.password_hash !== passwordHash) {
+          showAuthError("Incorrect password. Please try again.");
+          return;
+        }
+
+        await completeLogin(resolvedUser, rememberMe);
+      } else {
+        const existingLocal = Object.values(state.store.users).find(
+          (u) => normalizeUsername(u.username) === username
+        );
+        if (existingLocal) {
+          showAuthError(`Username @${username} is already registered. Please Sign In instead.`);
+          return;
+        }
+
+        const displayName = rawUsername.trim().replace(/^@+/, "") || username;
+        const colorIdx = Object.keys(state.store.users).length;
+        const newUser = {
+          id: userId,
+          username,
+          display_name: displayName,
+          password_hash: passwordHash,
+          status_text: "Active in Slack",
+          avatar_url: createSvgAvatarDataUrl(displayName, colorIdx),
+          updated_at: Date.now(),
+          last_seen: new Date().toISOString()
+        };
+
+        const apiRes = await callVercelApi(
+          {
+            action: "register",
+            user: newUser
+          },
+          true
+        );
+
+        if (apiRes && apiRes.ok === false && apiRes.error) {
+          showAuthError(apiRes.error);
+          return;
+        }
+
+        state.store.users[newUser.id] = newUser;
+        await persistAndBroadcast();
+        await completeLogin(newUser, rememberMe);
+      }
+    } catch (err) {
+      showAuthError(err.message || "Authentication failed.");
+    } finally {
+      submitBtn.disabled = false;
+    }
+  }
+
+  async function completeLogin(user, rememberMe = true) {
+    state.currentUser = user;
+    state.store.users[user.id] = user;
+
+    sessionStorage.setItem(STORAGE_KEYS.SESSION_UID_TAB, user.id);
+    if (rememberMe) {
+      localStorage.setItem(STORAGE_KEYS.REMEMBER_UID_LOCAL, user.id);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.REMEMBER_UID_LOCAL);
+    }
+
+    document.getElementById("auth-screen").classList.add("hidden");
+    document.getElementById("slack-app").classList.remove("hidden");
+
+    selectDefaultPartnerIfNeeded();
     renderAll(false);
+    await callVercelApi({ action: "sync" }, true);
     document.getElementById("composer-input").focus();
   }
 
+  function handleLogout() {
+    state.currentUser = null;
+    state.activePartnerId = null;
+    sessionStorage.removeItem(STORAGE_KEYS.SESSION_UID_TAB);
+    localStorage.removeItem(STORAGE_KEYS.REMEMBER_UID_LOCAL);
+
+    document.getElementById("slack-app").classList.add("hidden");
+    document.getElementById("auth-screen").classList.remove("hidden");
+    document.getElementById("auth-password").value = "";
+  }
+
   // ==========================================================================
-  // 5. UI RENDERING (TOPBAR, SIDEBAR, HEADER, MESSAGES, DRAWER)
+  // 5. 1-ON-1 PARTNER SELECTION & UI RENDERING
   // ==========================================================================
 
+  function getUsersArray() {
+    return Object.values(state.store.users || {});
+  }
+
+  function selectDefaultPartnerIfNeeded() {
+    if (!state.currentUser) return;
+    const allUsers = getUsersArray();
+    const otherUsers = allUsers.filter((u) => u.id !== state.currentUser.id);
+
+    if (
+      (!state.activePartnerId || state.activePartnerId === state.currentUser.id) &&
+      otherUsers.length > 0
+    ) {
+      const savedPartner = localStorage.getItem(STORAGE_KEYS.ACTIVE_PARTNER_ID);
+      const validSaved = otherUsers.find((u) => u.id === savedPartner);
+      state.activePartnerId = validSaved ? validSaved.id : otherUsers[0].id;
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_PARTNER_ID, state.activePartnerId);
+      return;
+    }
+
+    if (!state.activePartnerId || !state.store.users[state.activePartnerId]) {
+      state.activePartnerId = otherUsers.length > 0 ? otherUsers[0].id : state.currentUser.id;
+    }
+  }
+
+  function getActivePartner() {
+    if (!state.currentUser) return null;
+    const allUsers = getUsersArray();
+    return (
+      state.store.users[state.activePartnerId] ||
+      allUsers.find((u) => u.id !== state.currentUser.id) ||
+      state.currentUser
+    );
+  }
+
   function renderAll(preserveScroll = false) {
+    if (!state.currentUser) return;
     renderCurrentUserBadges();
     renderSidebarUsers();
     renderChatHeader();
@@ -570,8 +785,8 @@
   }
 
   function renderCurrentUserBadges() {
-    const me = getMyUser();
-    const other = state.store.users[getOtherSeatId(me.id)];
+    const me = state.currentUser;
+    if (!me) return;
     const avatar = me.avatar_url || createSvgAvatarDataUrl(me.display_name, 0);
 
     document.getElementById("topbar-user-avatar").src = avatar;
@@ -579,25 +794,23 @@
     document.getElementById("sidebar-my-name").textContent = me.display_name;
     document.getElementById("sidebar-my-username").textContent = `@${me.username}`;
 
-    const switchText = document.getElementById("topbar-switch-user-text");
-    if (switchText && other) {
-      switchText.textContent = `You: @${me.username} ⇄ Switch to @${other.username}`;
+    const topLabel = document.getElementById("topbar-user-label");
+    if (topLabel) {
+      topLabel.textContent = `@${me.username} · Edit Profile`;
     }
   }
 
   function renderSidebarUsers() {
     const listEl = document.getElementById("dm-users-list");
-    if (!listEl) return;
+    if (!listEl || !state.currentUser) return;
 
-    const me = getMyUser();
-    const other = state.store.users[getOtherSeatId(me.id)];
     const partner = getActivePartner();
-
-    const ordered = [other, me].filter(Boolean);
+    const otherUsers = getUsersArray().filter((u) => u.id !== state.currentUser.id);
+    const ordered = [...otherUsers, state.currentUser];
 
     let html = "";
     ordered.forEach((u, idx) => {
-      const isMe = u.id === me.id;
+      const isMe = u.id === state.currentUser.id;
       const isActive = partner && u.id === partner.id;
       const online = isUserOnline(u);
       const avatar = u.avatar_url || createSvgAvatarDataUrl(u.display_name, idx);
@@ -616,13 +829,21 @@
       `;
     });
 
+    if (otherUsers.length === 0) {
+      html += `
+        <div class="dm-empty-hint">
+          💬 When the 2nd person creates their account with a username and password, they will appear here automatically in real time.
+        </div>
+      `;
+    }
+
     listEl.innerHTML = html;
 
     listEl.querySelectorAll(".dm-item").forEach((item) => {
       item.addEventListener("click", () => {
         const uid = item.getAttribute("data-userid");
         state.activePartnerId = uid;
-        sessionStorage.setItem(STORAGE_KEYS.ACTIVE_PARTNER_SESSION, uid);
+        localStorage.setItem(STORAGE_KEYS.ACTIVE_PARTNER_ID, uid);
         document.getElementById("slack-sidebar").classList.remove("open");
         renderSidebarUsers();
         renderChatHeader();
@@ -637,11 +858,10 @@
   }
 
   function renderChatHeader() {
-    const me = getMyUser();
     const partner = getActivePartner();
-    if (!partner) return;
+    if (!partner || !state.currentUser) return;
 
-    const isMe = partner.id === me.id;
+    const isMe = partner.id === state.currentUser.id;
     const avatar = partner.avatar_url || createSvgAvatarDataUrl(partner.display_name, 1);
     const online = isUserOnline(partner);
 
@@ -664,7 +884,7 @@
   }
 
   function getFilteredConversationMessages() {
-    const me = getMyUser();
+    const me = state.currentUser;
     const partner = getActivePartner();
     if (!me || !partner) return [];
 
@@ -673,12 +893,11 @@
     return state.store.messages.filter((m) => {
       let belongsToPair = false;
       if (isSelfChat) {
-        belongsToPair = m.sender_id === me.id && m.receiver_id === me.id;
+        belongsToPair = m.sender_id === me.id && (!m.receiver_id || m.receiver_id === me.id);
       } else {
         belongsToPair =
-          (m.sender_id === me.id && m.receiver_id === partner.id) ||
-          (m.sender_id === partner.id && m.receiver_id === me.id) ||
-          m.sender_id !== m.receiver_id;
+          (m.sender_id === me.id && (m.receiver_id === partner.id || !m.receiver_id)) ||
+          (m.sender_id === partner.id && (m.receiver_id === me.id || !m.receiver_id));
       }
       if (!belongsToPair) return false;
 
@@ -692,14 +911,13 @@
 
   function renderMessagesList(preserveScrollIfNotBottom = false) {
     const viewport = document.getElementById("messages-viewport");
-    if (!viewport) return;
+    if (!viewport || !state.currentUser) return;
 
     const wasNearBottom =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
 
-    const me = getMyUser();
     const partner = getActivePartner();
-    const isMe = partner.id === me.id;
+    const isMe = partner.id === state.currentUser.id;
     const partnerAvatar = partner.avatar_url || createSvgAvatarDataUrl(partner.display_name, 1);
 
     const msgs = getFilteredConversationMessages();
@@ -718,8 +936,8 @@
         <p class="dm-hero-description">
           ${
             isMe
-              ? `<strong>This is your space.</strong> Draft messages, test formatting, or keep personal notes here.`
-              : `This is the very beginning of your direct message history with <strong>${escapeHtml(partner.display_name)}</strong> (<code>@${escapeHtml(partner.username)}</code>). Click any profile photo or name to view or edit their profile.`
+              ? `<strong>This is your space.</strong> Draft messages, test formatting, or open another window with a second account to chat in real time.`
+              : `This is the very beginning of your direct message history with <strong>${escapeHtml(partner.display_name)}</strong> (<code>@${escapeHtml(partner.username)}</code>).`
           }
         </p>
       </div>
@@ -756,6 +974,7 @@
       prevTimestampMs = msgTimeMs;
 
       const senderAvatar = sender.avatar_url || createSvgAvatarDataUrl(sender.display_name, 2);
+      const isOwnMsg = msg.sender_id === state.currentUser.id;
 
       // Reactions
       const reactionsObj = msg.reactions || {};
@@ -767,7 +986,7 @@
       if (reactionEntries.length > 0) {
         reactionsHtml = `<div class="msg-reactions-bar">`;
         reactionEntries.forEach(([emoji, uids]) => {
-          const iReacted = uids.includes(me.id);
+          const iReacted = uids.includes(state.currentUser.id);
           reactionsHtml += `
             <button type="button" class="reaction-chip ${iReacted ? "reacted" : ""}"
               data-react-msgid="${escapeHtml(msg.id)}" data-react-emoji="${escapeHtml(emoji)}">
@@ -817,7 +1036,11 @@
             <button type="button" class="hover-tool-btn" data-react-msgid="${escapeHtml(msg.id)}" data-react-emoji="😂" title="Laugh">😂</button>
             <button type="button" class="hover-tool-btn" data-react-msgid="${escapeHtml(msg.id)}" data-react-emoji="🎉" title="Celebrate">🎉</button>
             <button type="button" class="hover-tool-btn" data-react-msgid="${escapeHtml(msg.id)}" data-react-emoji="🔥" title="Fire">🔥</button>
-            <button type="button" class="hover-tool-btn delete-btn" data-delete-msgid="${escapeHtml(msg.id)}" title="Delete message">🗑️</button>
+            ${
+              isOwnMsg
+                ? `<button type="button" class="hover-tool-btn delete-btn" data-delete-msgid="${escapeHtml(msg.id)}" title="Delete message">🗑️</button>`
+                : ""
+            }
           </div>
         </div>
       `;
@@ -825,14 +1048,12 @@
 
     viewport.innerHTML = html;
 
-    // Profile click handlers
     viewport.querySelectorAll("[data-profile-uid]").forEach((el) => {
       el.addEventListener("click", () => {
         openProfileDrawer(el.getAttribute("data-profile-uid"));
       });
     });
 
-    // Reaction click handlers
     viewport.querySelectorAll("[data-react-msgid]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const msgId = btn.getAttribute("data-react-msgid");
@@ -841,7 +1062,6 @@
       });
     });
 
-    // Delete message click handlers
     viewport.querySelectorAll("[data-delete-msgid]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const msgId = btn.getAttribute("data-delete-msgid");
@@ -866,13 +1086,13 @@
   }
 
   async function handleSendMessage() {
+    if (!state.currentUser) return;
     const input = document.getElementById("composer-input");
     const text = input.value.trim();
     const attachment = state.pendingAttachment;
 
     if (!text && !attachment) return;
 
-    const me = getMyUser();
     const partner = getActivePartner();
 
     input.value = "";
@@ -883,8 +1103,8 @@
     const now = Date.now();
     const newMsg = {
       id: generateUuid(),
-      sender_id: me.id,
-      receiver_id: partner ? partner.id : getOtherSeatId(me.id),
+      sender_id: state.currentUser.id,
+      receiver_id: partner ? partner.id : null,
       content: text,
       image_url: attachment || null,
       reactions: {},
@@ -893,26 +1113,29 @@
     };
 
     state.store.messages.push(newMsg);
-    saveLocalCache(true);
+    await persistAndBroadcast();
     renderMessagesList(false);
 
-    await callVercelApi({
-      action: "send_message",
-      message: newMsg
-    });
+    await callVercelApi(
+      {
+        action: "send_message",
+        message: newMsg
+      },
+      false
+    );
   }
 
   async function toggleMessageReaction(msgId, emoji) {
-    const me = getMyUser();
+    if (!state.currentUser) return;
     const msg = state.store.messages.find((m) => m.id === msgId);
     if (!msg) return;
 
     const reactions = { ...(msg.reactions || {}) };
     const currentList = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
-    const myIdx = currentList.indexOf(me.id);
+    const myIdx = currentList.indexOf(state.currentUser.id);
 
     if (myIdx === -1) {
-      currentList.push(me.id);
+      currentList.push(state.currentUser.id);
     } else {
       currentList.splice(myIdx, 1);
     }
@@ -925,28 +1148,34 @@
 
     msg.reactions = reactions;
     msg.updated_at = Date.now();
-    saveLocalCache(true);
+    await persistAndBroadcast();
     renderMessagesList(true);
 
-    await callVercelApi({
-      action: "toggle_reaction",
-      messageId: msgId,
-      reactions
-    });
+    await callVercelApi(
+      {
+        action: "toggle_reaction",
+        messageId: msgId,
+        reactions
+      },
+      false
+    );
   }
 
   async function deleteMessage(msgId) {
     state.store.deletedIds = Array.from(new Set([...(state.store.deletedIds || []), msgId])).slice(
-      -500
+      -1000
     );
     state.store.messages = state.store.messages.filter((m) => m.id !== msgId);
-    saveLocalCache(true);
+    await persistAndBroadcast();
     renderMessagesList(true);
 
-    await callVercelApi({
-      action: "delete_message",
-      messageId: msgId
-    });
+    await callVercelApi(
+      {
+        action: "delete_message",
+        messageId: msgId
+      },
+      false
+    );
   }
 
   async function handleClearChat() {
@@ -955,12 +1184,15 @@
 
     state.store.clearedAt = Date.now();
     state.store.messages = [];
-    saveLocalCache(true);
+    await persistAndBroadcast();
     renderMessagesList(false);
 
-    await callVercelApi({
-      action: "clear_chat"
-    });
+    await callVercelApi(
+      {
+        action: "clear_chat"
+      },
+      false
+    );
   }
 
   function applyFormatToComposer(formatType) {
@@ -1012,7 +1244,7 @@
 
     const online = isUserOnline(user);
     const avatar = user.avatar_url || createSvgAvatarDataUrl(user.display_name, 1);
-    const isMe = user.id === state.myUserId;
+    const isMe = state.currentUser && user.id === state.currentUser.id;
 
     document.getElementById("drawer-avatar").src = avatar;
     document.getElementById("drawer-name").textContent = user.display_name;
@@ -1025,39 +1257,36 @@
       label.textContent = "Active now";
     } else {
       dot.classList.add("offline");
-      label.textContent = "Away";
+      label.textContent = "Offline";
     }
 
-    const editBtn = document.getElementById("drawer-edit-profile-btn");
-    editBtn.textContent = isMe ? "✏️ Edit my profile" : `✏️ Edit @${user.username}'s profile`;
+    const editBtn = document.getElementById("drawer-edit-my-profile-btn");
+    if (isMe) {
+      editBtn.classList.remove("hidden");
+    } else {
+      editBtn.classList.add("hidden");
+    }
 
     document.getElementById("drawer-info-fullname").textContent = user.display_name;
     document.getElementById("drawer-info-handle").textContent = `@${user.username}`;
-    document.getElementById("drawer-info-status").textContent = user.status_text || "Active in Slack";
+    document.getElementById("drawer-info-status").textContent =
+      user.status_text || "Active in Slack";
     document.getElementById("drawer-info-localtime").textContent = new Date().toLocaleTimeString(
       "en-US",
       { hour: "2-digit", minute: "2-digit" }
     );
   }
 
-  function openEditProfileModal(targetUserId) {
-    const uid =
-      typeof targetUserId === "string" && state.store.users[targetUserId]
-        ? targetUserId
-        : state.myUserId;
-    state.editingUserId = uid;
+  function openEditProfileModal() {
+    if (!state.currentUser) return;
+    const me = state.currentUser;
+    state.editAvatarDataUrl = me.avatar_url || createSvgAvatarDataUrl(me.display_name, 0);
 
-    const user = state.store.users[uid];
-    if (!user) return;
-
-    state.editAvatarDataUrl = user.avatar_url || createSvgAvatarDataUrl(user.display_name, 0);
-
-    document.getElementById("edit-profile-modal-title").textContent =
-      uid === state.myUserId ? "Edit your profile" : `Edit ${user.display_name}'s profile`;
     document.getElementById("edit-avatar-preview").src = state.editAvatarDataUrl;
-    document.getElementById("edit-display-name").value = user.display_name;
-    document.getElementById("edit-username").value = user.username;
-    document.getElementById("edit-status-text").value = user.status_text || "";
+    document.getElementById("edit-display-name").value = me.display_name;
+    document.getElementById("edit-username").value = me.username;
+    document.getElementById("edit-status-text").value = me.status_text || "Active in Slack";
+    document.getElementById("edit-new-password").value = "";
     document.getElementById("edit-profile-error").classList.add("hidden");
 
     document.getElementById("edit-profile-modal").classList.remove("hidden");
@@ -1069,9 +1298,7 @@
 
   async function handleSaveEditProfile(e) {
     e.preventDefault();
-    const uid = state.editingUserId || state.myUserId;
-    const user = state.store.users[uid];
-    if (!user) return;
+    if (!state.currentUser) return;
 
     const errBox = document.getElementById("edit-profile-error");
     errBox.classList.add("hidden");
@@ -1080,6 +1307,7 @@
     const rawUsername = document.getElementById("edit-username").value;
     const username = normalizeUsername(rawUsername);
     const statusText = document.getElementById("edit-status-text").value.trim();
+    const newPassword = document.getElementById("edit-new-password").value;
 
     if (!displayName) {
       errBox.textContent = "Display name cannot be empty.";
@@ -1092,25 +1320,55 @@
       return;
     }
 
+    const conflict = Object.values(state.store.users).find(
+      (u) => normalizeUsername(u.username) === username && u.id !== state.currentUser.id
+    );
+    if (conflict) {
+      errBox.textContent = `Username @${username} is already taken by another user.`;
+      errBox.classList.remove("hidden");
+      return;
+    }
+
+    let passwordHash = state.currentUser.password_hash;
+    if (newPassword && newPassword.trim().length > 0) {
+      if (newPassword.length < 3) {
+        errBox.textContent = "New password must be at least 3 characters.";
+        errBox.classList.remove("hidden");
+        return;
+      }
+      passwordHash = await hashPassword(newPassword, username);
+    }
+
     const updatedUser = {
-      ...user,
+      ...state.currentUser,
       display_name: displayName,
-      username: username,
+      username,
       status_text: statusText || "Active in Slack",
-      avatar_url: state.editAvatarDataUrl || user.avatar_url,
+      avatar_url: state.editAvatarDataUrl || state.currentUser.avatar_url,
+      password_hash: passwordHash,
       updated_at: Date.now(),
       last_seen: new Date().toISOString()
     };
 
-    state.store.users[uid] = updatedUser;
-    saveLocalCache(true);
+    const apiRes = await callVercelApi(
+      {
+        action: "update_profile",
+        user: updatedUser
+      },
+      false
+    );
+
+    if (apiRes && apiRes.ok === false && apiRes.error) {
+      errBox.textContent = apiRes.error;
+      errBox.classList.remove("hidden");
+      return;
+    }
+
+    state.currentUser = updatedUser;
+    state.store.users[updatedUser.id] = updatedUser;
+    await persistAndBroadcast();
     renderAll(true);
     closeEditProfileModal();
-
-    await callVercelApi({
-      action: "update_profile",
-      user: updatedUser
-    });
   }
 
   // ==========================================================================
@@ -1161,27 +1419,25 @@
   }
 
   function bindAllEvents() {
-    // Switch User buttons (Topbar & Sidebar)
+    // Auth Tabs & Form
+    document.getElementById("tab-login").addEventListener("click", () => switchAuthTab("login"));
     document
-      .getElementById("topbar-switch-user-btn")
-      .addEventListener("click", switchActiveUserSeat);
-    document.getElementById("btn-switch-user").addEventListener("click", switchActiveUserSeat);
+      .getElementById("tab-register")
+      .addEventListener("click", () => switchAuthTab("register"));
+    document.getElementById("auth-form").addEventListener("submit", handleAuthSubmit);
 
-    // Edit Profile triggers
-    document
-      .getElementById("topbar-user-btn")
-      .addEventListener("click", () => openEditProfileModal(state.myUserId));
+    // Edit Profile & Sign Out
+    document.getElementById("topbar-edit-profile-btn").addEventListener("click", openEditProfileModal);
+    document.getElementById("topbar-user-btn").addEventListener("click", openEditProfileModal);
     document
       .getElementById("sidebar-my-profile-trigger")
-      .addEventListener("click", () => openEditProfileModal(state.myUserId));
+      .addEventListener("click", openEditProfileModal);
     document
       .getElementById("btn-open-edit-profile")
-      .addEventListener("click", () => openEditProfileModal(state.myUserId));
-    document.getElementById("drawer-edit-profile-btn").addEventListener("click", () => {
-      openEditProfileModal(state.drawerUserId || state.myUserId);
-    });
-
-    // Edit Profile Modal controls
+      .addEventListener("click", openEditProfileModal);
+    document
+      .getElementById("drawer-edit-my-profile-btn")
+      .addEventListener("click", openEditProfileModal);
     document
       .getElementById("btn-close-edit-profile")
       .addEventListener("click", closeEditProfileModal);
@@ -1191,6 +1447,7 @@
     document
       .getElementById("edit-profile-form")
       .addEventListener("submit", handleSaveEditProfile);
+    document.getElementById("btn-logout").addEventListener("click", handleLogout);
 
     // Upload Photo in Edit Profile
     document.getElementById("edit-avatar-file").addEventListener("change", async (e) => {
@@ -1230,7 +1487,7 @@
     // Clear Chat
     document.getElementById("btn-clear-chat").addEventListener("click", handleClearChat);
 
-    // Mobile Sidebar menu
+    // Mobile Sidebar toggle
     document.getElementById("mobile-menu-toggle").addEventListener("click", () => {
       document.getElementById("slack-sidebar").classList.toggle("open");
     });
@@ -1272,7 +1529,7 @@
       composerInput.focus();
     });
 
-    // Composer formatting toolbar
+    // Formatting toolbar
     document.querySelectorAll(".format-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         applyFormatToComposer(btn.getAttribute("data-format"));
@@ -1311,14 +1568,33 @@
     });
   }
 
-  function bootstrap() {
-    loadLocalCache();
+  async function bootstrap() {
     renderPresetAvatarStrips();
     renderEmojiPopover();
     bindAllEvents();
-    renderAll(false);
+
+    const cached = await idbLoadStore();
+    if (cached && cached.users) {
+      state.store = {
+        clearedAt: cached.clearedAt || 0,
+        deletedIds: Array.isArray(cached.deletedIds) ? cached.deletedIds : [],
+        users: cached.users || {},
+        messages: Array.isArray(cached.messages) ? cached.messages : []
+      };
+    }
+
     startRealtimeSync();
-    document.getElementById("composer-input").focus();
+    await callVercelApi({ action: "sync" }, true);
+
+    // Auto-restore remembered login
+    const rememberedUid =
+      sessionStorage.getItem(STORAGE_KEYS.SESSION_UID_TAB) ||
+      localStorage.getItem(STORAGE_KEYS.REMEMBER_UID_LOCAL);
+
+    if (rememberedUid && state.store.users[rememberedUid]) {
+      const isPersistent = Boolean(localStorage.getItem(STORAGE_KEYS.REMEMBER_UID_LOCAL));
+      await completeLogin(state.store.users[rememberedUid], isPersistent);
+    }
   }
 
   document.addEventListener("DOMContentLoaded", bootstrap);
