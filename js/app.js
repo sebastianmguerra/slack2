@@ -5,16 +5,54 @@
 (function () {
   "use strict";
 
+  const CURRENT_EPOCH = 4;
+
   const STORAGE_KEYS = {
-    REMEMBER_UID_LOCAL: "slack_v3_remembered_uid",
-    SESSION_UID_TAB: "slack_v3_session_uid",
-    ACTIVE_PARTNER_ID: "slack_v3_active_partner_id",
-    FALLBACK_STORE: "slack_v3_fallback_store"
+    REMEMBER_UID_LOCAL: "slack_v4_remembered_uid",
+    SESSION_UID_TAB: "slack_v4_session_uid",
+    ACTIVE_PARTNER_ID: "slack_v4_active_partner_id",
+    FALLBACK_STORE: "slack_v4_fallback_store",
+    CLEANED_EPOCH: "slack_v4_cleaned_epoch"
   };
 
-  const IDB_NAME = "slack_1on1_idb_v3";
+  const IDB_NAME = "slack_1on1_idb_v4";
   const IDB_STORE = "kv";
   const IDB_KEY = "chat_state";
+
+  function purgeLegacyStorage() {
+    try {
+      if (localStorage.getItem(STORAGE_KEYS.CLEANED_EPOCH) === String(CURRENT_EPOCH)) {
+        return;
+      }
+      const legacyKeys = [
+        "slack_clone_session_uid_v1",
+        "slack_clone_partner_uid_v1",
+        "slack_clone_supabase_cfg_v1",
+        "slack_clone_local_users_v1",
+        "slack_clone_local_messages_v1",
+        "slack_v2_my_seat_id",
+        "slack_v2_session_seat_id",
+        "slack_v2_partner_id",
+        "slack_v2_store_cache",
+        "slack_v3_remembered_uid",
+        "slack_v3_session_uid",
+        "slack_v3_active_partner_id",
+        "slack_v3_fallback_store"
+      ];
+      legacyKeys.forEach((k) => {
+        try {
+          localStorage.removeItem(k);
+          sessionStorage.removeItem(k);
+        } catch (_) {}
+      });
+      if ("indexedDB" in window) {
+        try {
+          indexedDB.deleteDatabase("slack_1on1_idb_v3");
+        } catch (_) {}
+      }
+      localStorage.setItem(STORAGE_KEYS.CLEANED_EPOCH, String(CURRENT_EPOCH));
+    } catch (_) {}
+  }
 
   const SLACK_AVATAR_COLORS = [
     { bg: "#E01E5A", fg: "#FFFFFF" },
@@ -279,6 +317,8 @@
     activePartnerId: null,
 
     store: {
+      epoch: CURRENT_EPOCH,
+      resetAt: 0,
       clearedAt: 0,
       deletedIds: [],
       users: {},
@@ -321,6 +361,8 @@
     }
 
     return {
+      epoch: CURRENT_EPOCH,
+      resetAt: state.store.resetAt || 0,
       clearedAt: state.store.clearedAt || 0,
       deletedIds: (state.store.deletedIds || []).slice(-500),
       users,
@@ -1569,13 +1611,16 @@
   }
 
   async function bootstrap() {
+    purgeLegacyStorage();
     renderPresetAvatarStrips();
     renderEmojiPopover();
     bindAllEvents();
 
     const cached = await idbLoadStore();
-    if (cached && cached.users) {
+    if (cached && cached.epoch === CURRENT_EPOCH && cached.users) {
       state.store = {
+        epoch: CURRENT_EPOCH,
+        resetAt: cached.resetAt || 0,
         clearedAt: cached.clearedAt || 0,
         deletedIds: Array.isArray(cached.deletedIds) ? cached.deletedIds : [],
         users: cached.users || {},
@@ -1594,6 +1639,8 @@
     if (rememberedUid && state.store.users[rememberedUid]) {
       const isPersistent = Boolean(localStorage.getItem(STORAGE_KEYS.REMEMBER_UID_LOCAL));
       await completeLogin(state.store.users[rememberedUid], isPersistent);
+    } else if (Object.keys(state.store.users).length === 0) {
+      switchAuthTab("register");
     }
   }
 

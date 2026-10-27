@@ -1,10 +1,13 @@
 const fs = require("fs");
 const path = require("path");
 
-const TMP_FILE = path.join("/tmp", "slack_1on1_store_v3.json");
+const TMP_FILE = path.join("/tmp", "slack_1on1_store_v4.json");
+const CURRENT_EPOCH = 4;
 
 function getDefaultStore() {
   return {
+    epoch: CURRENT_EPOCH,
+    resetAt: 0,
     clearedAt: 0,
     deletedIds: [],
     users: {},
@@ -14,27 +17,33 @@ function getDefaultStore() {
 }
 
 function loadStore() {
-  if (global.__SLACK_CHAT_STORE_V3__) {
-    return global.__SLACK_CHAT_STORE_V3__;
+  if (global.__SLACK_CHAT_STORE_V4__ && global.__SLACK_CHAT_STORE_V4__.epoch === CURRENT_EPOCH) {
+    return global.__SLACK_CHAT_STORE_V4__;
   }
   try {
     if (fs.existsSync(TMP_FILE)) {
       const raw = fs.readFileSync(TMP_FILE, "utf8");
       const parsed = JSON.parse(raw);
-      if (parsed && parsed.users && Array.isArray(parsed.messages)) {
-        global.__SLACK_CHAT_STORE_V3__ = parsed;
+      if (
+        parsed &&
+        parsed.epoch === CURRENT_EPOCH &&
+        parsed.users &&
+        Array.isArray(parsed.messages)
+      ) {
+        global.__SLACK_CHAT_STORE_V4__ = parsed;
         return parsed;
       }
     }
   } catch (_) {}
 
   const initial = getDefaultStore();
-  global.__SLACK_CHAT_STORE_V3__ = initial;
+  global.__SLACK_CHAT_STORE_V4__ = initial;
+  saveStore(initial);
   return initial;
 }
 
 function saveStore(store) {
-  global.__SLACK_CHAT_STORE_V3__ = store;
+  global.__SLACK_CHAT_STORE_V4__ = store;
   try {
     fs.writeFileSync(TMP_FILE, JSON.stringify(store), "utf8");
   } catch (_) {}
@@ -42,6 +51,9 @@ function saveStore(store) {
 
 function mergeClientSnapshot(store, snapshot) {
   if (!snapshot || typeof snapshot !== "object") return false;
+  if (snapshot.epoch !== CURRENT_EPOCH) return false;
+  if ((snapshot.resetAt || 0) < (store.resetAt || 0)) return false;
+
   let modified = false;
 
   if (typeof snapshot.clearedAt === "number" && snapshot.clearedAt > (store.clearedAt || 0)) {
@@ -70,6 +82,7 @@ function mergeClientSnapshot(store, snapshot) {
 
     for (const incoming of incomingList) {
       if (!incoming || !incoming.id || !incoming.username) continue;
+      if ((incoming.updated_at || 0) <= (store.resetAt || 0)) continue;
       const current = store.users[incoming.id];
       if (!current || (incoming.updated_at || 0) > (current.updated_at || 0)) {
         store.users[incoming.id] = {
@@ -98,7 +111,7 @@ function mergeClientSnapshot(store, snapshot) {
     for (const m of snapshot.messages) {
       if (!m || !m.id || delSet.has(m.id)) continue;
       const createdMs = new Date(m.created_at).getTime() || 0;
-      if (createdMs <= (store.clearedAt || 0)) continue;
+      if (createdMs <= (store.clearedAt || 0) || createdMs <= (store.resetAt || 0)) continue;
       const existing = byId.get(m.id);
       if (!existing || (m.updated_at || 0) > (existing.updated_at || 0)) {
         byId.set(m.id, m);
@@ -137,6 +150,8 @@ module.exports = async (req, res) => {
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
+      epoch: CURRENT_EPOCH,
+      resetAt: store.resetAt || 0,
       clearedAt: store.clearedAt || 0,
       deletedIds: store.deletedIds || [],
       users: Object.values(store.users),
@@ -157,6 +172,23 @@ module.exports = async (req, res) => {
     body = body || {};
 
     const { action, activeUserId, snapshot } = body;
+
+    if (action === "reset_all") {
+      const fresh = getDefaultStore();
+      fresh.resetAt = now;
+      fresh.clearedAt = now;
+      saveStore(fresh);
+      return res.status(200).json({
+        ok: true,
+        epoch: CURRENT_EPOCH,
+        resetAt: fresh.resetAt,
+        clearedAt: fresh.clearedAt,
+        deletedIds: [],
+        users: [],
+        messages: [],
+        typing: {}
+      });
+    }
 
     let modified = false;
     if (snapshot) {
@@ -290,6 +322,8 @@ module.exports = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
+      epoch: CURRENT_EPOCH,
+      resetAt: store.resetAt || 0,
       clearedAt: store.clearedAt || 0,
       deletedIds: store.deletedIds || [],
       users: Object.values(store.users),
