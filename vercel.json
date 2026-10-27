@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "buildCommand": "node build-config.js",
+  "outputDirectory": ".",
+  "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/((?!css/|js/|supabase/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
