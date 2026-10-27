@@ -1608,6 +1608,401 @@
     document.addEventListener("click", () => {
       emojiPop.classList.add("hidden");
     });
+
+    // Discrete Mini TikTok Scroller
+    initMiniTikTokPlayer();
+  }
+
+  // ==========================================================================
+  // 9. DISCRETE MINI TIKTOK / VERTICAL VIDEO PLAYER
+  // ==========================================================================
+
+  const miniPlayer = {
+    open: false,
+    minimized: false,
+    muted: false,
+    region: "US",
+    loading: false,
+    videos: [],
+    observer: null
+  };
+
+  function normalizeTikwmVideo(v) {
+    if (!v || (!v.play && !v.wmplay && !v.playUrl)) return null;
+    if (v.playUrl) return v;
+    const authorObj = v.author || {};
+    return {
+      id: String(v.video_id || v.id || Math.random().toString(36).slice(2)),
+      title: String(v.title || "").trim() || "TikTok Video",
+      playUrl: v.play || v.wmplay,
+      coverUrl: v.cover || v.origin_cover || "",
+      authorName: authorObj.nickname || authorObj.unique_id || "creator",
+      authorHandle: authorObj.unique_id || "tiktok"
+    };
+  }
+
+  async function fetchMiniTikTokBatch(region, forceRefresh = false) {
+    // 1. Try Vercel /api/tiktok first
+    if (window.location.protocol !== "file:") {
+      try {
+        const res = await fetch(
+          `/api/tiktok?region=${encodeURIComponent(region)}${forceRefresh ? "&refresh=1" : ""}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.videos) && data.videos.length > 0) {
+            return data.videos;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2. Direct browser fallback to tikwm CORS endpoint
+    try {
+      const res = await fetch(
+        `https://www.tikwm.com/api/feed/list?region=${encodeURIComponent(region)}&count=10`
+      );
+      const json = await res.json();
+      if (json && json.code === 0 && Array.isArray(json.data)) {
+        return json.data.map(normalizeTikwmVideo).filter(Boolean);
+      }
+    } catch (_) {}
+
+    return [];
+  }
+
+  async function resolveSingleTikTokUrl(rawUrl) {
+    if (window.location.protocol !== "file:") {
+      try {
+        const res = await fetch(`/api/tiktok?url=${encodeURIComponent(rawUrl)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.videos) && data.videos[0]) {
+            return data.videos[0];
+          }
+        }
+      } catch (_) {}
+    }
+    try {
+      const res = await fetch(
+        `https://www.tikwm.com/api/?url=${encodeURIComponent(rawUrl)}`
+      );
+      const json = await res.json();
+      if (json && json.code === 0 && json.data) {
+        return normalizeTikwmVideo(json.data);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function pauseAllMiniVideos() {
+    const feedEl = document.getElementById("mini-tiktok-feed");
+    if (!feedEl) return;
+    feedEl.querySelectorAll("video").forEach((v) => {
+      try {
+        v.pause();
+      } catch (_) {}
+    });
+  }
+
+  function setupMiniScrollObserver() {
+    const feedEl = document.getElementById("mini-tiktok-feed");
+    if (!feedEl) return;
+
+    if (miniPlayer.observer) {
+      miniPlayer.observer.disconnect();
+    }
+
+    miniPlayer.observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const video = entry.target.querySelector("video");
+          if (!video) return;
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.6 && miniPlayer.open && !miniPlayer.minimized) {
+            video.muted = miniPlayer.muted;
+            video.play().catch(() => {
+              // If browser blocks unmuted autoplay, fallback to muted
+              video.muted = true;
+              miniPlayer.muted = true;
+              updateMuteButtonIcon();
+              video.play().catch(() => {});
+            });
+
+            // Infinite scroll: load more when reaching near the end
+            const idx = Number(entry.target.getAttribute("data-slide-idx") || 0);
+            if (idx >= miniPlayer.videos.length - 2 && !miniPlayer.loading) {
+              loadMoreMiniVideos(false);
+            }
+          } else {
+            video.pause();
+          }
+        });
+      },
+      {
+        root: feedEl,
+        threshold: [0.6]
+      }
+    );
+
+    feedEl.querySelectorAll(".mini-video-slide").forEach((slide) => {
+      miniPlayer.observer.observe(slide);
+    });
+  }
+
+  function updateMuteButtonIcon() {
+    const btn = document.getElementById("mini-btn-mute");
+    if (btn) {
+      btn.textContent = miniPlayer.muted ? "🔇" : "🔊";
+    }
+  }
+
+  function createSlideElement(video, idx) {
+    const slide = document.createElement("div");
+    slide.className = "mini-video-slide";
+    slide.setAttribute("data-slide-idx", String(idx));
+
+    slide.innerHTML = `
+      <video
+        class="mini-video-el"
+        src="${escapeHtml(video.playUrl)}"
+        poster="${escapeHtml(video.coverUrl || "")}"
+        playsinline
+        webkit-playsinline
+        loop
+        preload="metadata"
+      ></video>
+      <div class="mini-slide-actions">
+        <button type="button" class="mini-action-pill" data-mini-nav="prev" title="Previous video">▲</button>
+        <button type="button" class="mini-action-pill" data-mini-nav="next" title="Next video">▼</button>
+        <button type="button" class="mini-action-pill" data-mini-share="${idx}" title="Share to chat">💬</button>
+      </div>
+      <div class="mini-video-overlay">
+        <div class="mini-video-author">@${escapeHtml(video.authorHandle || video.authorName || "tiktok")}</div>
+        <div class="mini-video-caption">${escapeHtml(video.title || "")}</div>
+      </div>
+    `;
+
+    const videoEl = slide.querySelector("video");
+    videoEl.muted = miniPlayer.muted;
+    videoEl.addEventListener("click", () => {
+      if (videoEl.paused) {
+        videoEl.play().catch(() => {});
+      } else {
+        videoEl.pause();
+      }
+    });
+
+    slide.querySelector('[data-mini-nav="prev"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      const prev = slide.previousElementSibling;
+      if (prev) prev.scrollIntoView({ behavior: "smooth" });
+    });
+
+    slide.querySelector('[data-mini-nav="next"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      const next = slide.nextElementSibling;
+      if (next) next.scrollIntoView({ behavior: "smooth" });
+    });
+
+    slide.querySelector("[data-mini-share]").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!state.currentUser) return;
+      const composer = document.getElementById("composer-input");
+      composer.value = `🎬 *@${video.authorHandle}*: ${video.title.slice(0, 80)} ${video.playUrl}`;
+      updateSendButtonState();
+      await handleSendMessage();
+    });
+
+    return slide;
+  }
+
+  async function loadMoreMiniVideos(reset = false) {
+    if (miniPlayer.loading) return;
+    miniPlayer.loading = true;
+    const feedEl = document.getElementById("mini-tiktok-feed");
+
+    if (reset) {
+      pauseAllMiniVideos();
+      miniPlayer.videos = [];
+      feedEl.innerHTML = `<div class="mini-empty-state">Loading reels...</div>`;
+    }
+
+    try {
+      const batch = await fetchMiniTikTokBatch(miniPlayer.region, reset);
+      const existingIds = new Set(miniPlayer.videos.map((v) => v.id));
+      const fresh = batch.filter((v) => v && !existingIds.has(v.id));
+      const toAdd = fresh.length > 0 ? fresh : batch;
+
+      if (reset) {
+        feedEl.innerHTML = "";
+      } else {
+        const emptyEl = feedEl.querySelector(".mini-empty-state");
+        if (emptyEl) emptyEl.remove();
+      }
+
+      if (toAdd.length === 0 && miniPlayer.videos.length === 0) {
+        feedEl.innerHTML = `
+          <div class="mini-empty-state">
+            <span>Couldn't load feed right now.</span>
+            <button type="button" class="mini-url-go" id="mini-retry-btn">Retry</button>
+          </div>
+        `;
+        const retryBtn = document.getElementById("mini-retry-btn");
+        if (retryBtn) {
+          retryBtn.addEventListener("click", () => loadMoreMiniVideos(true));
+        }
+        return;
+      }
+
+      toAdd.forEach((v) => {
+        const idx = miniPlayer.videos.length;
+        miniPlayer.videos.push(v);
+        const slideEl = createSlideElement(v, idx);
+        feedEl.appendChild(slideEl);
+      });
+
+      setupMiniScrollObserver();
+    } finally {
+      miniPlayer.loading = false;
+    }
+  }
+
+  function toggleMiniTikTokPlayer(forceOpen) {
+    const widget = document.getElementById("mini-tiktok-widget");
+    const sidebarBtn = document.getElementById("sidebar-mini-tiktok-btn");
+    if (!widget || !sidebarBtn) return;
+
+    miniPlayer.open = typeof forceOpen === "boolean" ? forceOpen : !miniPlayer.open;
+
+    if (miniPlayer.open) {
+      widget.classList.remove("hidden");
+      sidebarBtn.classList.add("active-mini");
+      document.getElementById("slack-sidebar").classList.remove("open");
+      if (miniPlayer.videos.length === 0) {
+        loadMoreMiniVideos(true);
+      } else {
+        setupMiniScrollObserver();
+      }
+    } else {
+      pauseAllMiniVideos();
+      widget.classList.add("hidden");
+      sidebarBtn.classList.remove("active-mini");
+    }
+  }
+
+  function initMiniTikTokPlayer() {
+    const sidebarBtn = document.getElementById("sidebar-mini-tiktok-btn");
+    const widget = document.getElementById("mini-tiktok-widget");
+    const dragHandle = document.getElementById("mini-tiktok-drag-handle");
+    const btnMute = document.getElementById("mini-btn-mute");
+    const btnRefresh = document.getElementById("mini-btn-refresh");
+    const btnMinimize = document.getElementById("mini-btn-minimize");
+    const btnClose = document.getElementById("mini-btn-close");
+    const regionSelect = document.getElementById("mini-region-select");
+    const urlForm = document.getElementById("mini-url-form");
+    const urlInput = document.getElementById("mini-url-input");
+
+    if (!sidebarBtn || !widget) return;
+
+    sidebarBtn.addEventListener("click", () => toggleMiniTikTokPlayer());
+
+    btnClose.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleMiniTikTokPlayer(false);
+    });
+
+    btnMinimize.addEventListener("click", (e) => {
+      e.stopPropagation();
+      miniPlayer.minimized = !miniPlayer.minimized;
+      widget.classList.toggle("minimized", miniPlayer.minimized);
+      if (miniPlayer.minimized) {
+        pauseAllMiniVideos();
+      } else {
+        setupMiniScrollObserver();
+      }
+    });
+
+    btnMute.addEventListener("click", (e) => {
+      e.stopPropagation();
+      miniPlayer.muted = !miniPlayer.muted;
+      updateMuteButtonIcon();
+      widget.querySelectorAll("video").forEach((v) => {
+        v.muted = miniPlayer.muted;
+      });
+    });
+
+    btnRefresh.addEventListener("click", (e) => {
+      e.stopPropagation();
+      loadMoreMiniVideos(true);
+    });
+
+    regionSelect.addEventListener("change", (e) => {
+      e.stopPropagation();
+      miniPlayer.region = regionSelect.value || "US";
+      loadMoreMiniVideos(true);
+    });
+
+    urlForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const val = urlInput.value.trim();
+      if (!val) return;
+      urlInput.value = "Loading...";
+      urlInput.disabled = true;
+      try {
+        const video = await resolveSingleTikTokUrl(val);
+        if (video) {
+          const feedEl = document.getElementById("mini-tiktok-feed");
+          const emptyEl = feedEl.querySelector(".mini-empty-state");
+          if (emptyEl) emptyEl.remove();
+
+          const idx = miniPlayer.videos.length;
+          miniPlayer.videos.push(video);
+          const slideEl = createSlideElement(video, idx);
+          feedEl.prepend(slideEl);
+          setupMiniScrollObserver();
+          slideEl.scrollIntoView({ behavior: "smooth" });
+        } else {
+          alert("Could not load that TikTok URL. Try pasting a full tiktok.com video link.");
+        }
+      } finally {
+        urlInput.disabled = false;
+        urlInput.value = "";
+      }
+    });
+
+    // Make the discrete mini widget draggable by its top header bar
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+    let origLeft = 0;
+    let origTop = 0;
+
+    dragHandle.addEventListener("mousedown", (e) => {
+      if (e.target.closest("button") || e.target.closest("select")) return;
+      isDragging = true;
+      const rect = widget.getBoundingClientRect();
+      startX = e.clientX;
+      startY = e.clientY;
+      origLeft = rect.left;
+      origTop = rect.top;
+      widget.style.bottom = "auto";
+      widget.style.left = origLeft + "px";
+      widget.style.top = origTop + "px";
+    });
+
+    document.addEventListener("mousemove", (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      const maxLeft = window.innerWidth - widget.offsetWidth - 6;
+      const maxTop = window.innerHeight - widget.offsetHeight - 6;
+      widget.style.left = Math.max(6, Math.min(maxLeft, origLeft + dx)) + "px";
+      widget.style.top = Math.max(6, Math.min(maxTop, origTop + dy)) + "px";
+    });
+
+    document.addEventListener("mouseup", () => {
+      isDragging = false;
+    });
   }
 
   async function bootstrap() {

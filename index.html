@@ -165,6 +165,21 @@
           <div id="dm-users-list" class="dm-list">
             <!-- Dynamically populated with the 1-on-1 participants -->
           </div>
+
+          <div class="sidebar-section-header" style="margin-top: 14px;">
+            <div class="sidebar-section-label">
+              <span>▾</span>
+              <span>Apps</span>
+            </div>
+          </div>
+
+          <div id="sidebar-mini-tiktok-btn" class="sidebar-channel-item" title="Toggle discrete mini TikTok scroller">
+            <div class="sidebar-channel-left">
+              <span class="sidebar-channel-hash">🎬</span>
+              <span>mini-reels</span>
+            </div>
+            <span class="sidebar-mini-dot"></span>
+          </div>
         </div>
 
         <!-- Current authenticated user card at bottom-left -->
@@ -332,6 +347,46 @@
           </div>
         </div>
       </aside>
+    </div>
+
+    <!-- Discrete Tiny TikTok / Vertical Video Scroller (Toggled from Sidebar) -->
+    <div id="mini-tiktok-widget" class="mini-tiktok-widget hidden">
+      <div id="mini-tiktok-drag-handle" class="mini-tiktok-header">
+        <div class="mini-header-left">
+          <span>🎬</span>
+          <span>mini-reels</span>
+          <select id="mini-region-select" class="mini-region-select" title="Feed region">
+            <option value="US">US</option>
+            <option value="GB">UK</option>
+            <option value="CA">CA</option>
+            <option value="MX">MX</option>
+            <option value="CO">CO</option>
+            <option value="ES">ES</option>
+            <option value="BR">BR</option>
+            <option value="JP">JP</option>
+          </select>
+        </div>
+        <div class="mini-header-actions">
+          <button type="button" id="mini-btn-mute" class="mini-ctrl-btn" title="Mute / Unmute">🔊</button>
+          <button type="button" id="mini-btn-refresh" class="mini-ctrl-btn" title="Load new videos">↻</button>
+          <button type="button" id="mini-btn-minimize" class="mini-ctrl-btn" title="Minimize">—</button>
+          <button type="button" id="mini-btn-close" class="mini-ctrl-btn" title="Close">✕</button>
+        </div>
+      </div>
+
+      <form id="mini-url-form" class="mini-url-bar">
+        <input
+          type="text"
+          id="mini-url-input"
+          class="mini-url-input"
+          placeholder="Paste TikTok link or scroll..."
+        />
+        <button type="submit" class="mini-url-go">Go</button>
+      </form>
+
+      <div id="mini-tiktok-feed" class="mini-tiktok-feed">
+        <div class="mini-empty-state">Loading reels...</div>
+      </div>
     </div>
   </div>
 
