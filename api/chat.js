@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const TMP_FILE = path.join("/tmp", "slack_1on1_store_v4.json");
 const CURRENT_EPOCH = 4;
@@ -7,6 +8,7 @@ const CURRENT_EPOCH = 4;
 function getDefaultStore() {
   return {
     epoch: CURRENT_EPOCH,
+    version: 1,
     resetAt: 0,
     clearedAt: 0,
     deletedIds: [],
@@ -18,6 +20,9 @@ function getDefaultStore() {
 
 function loadStore() {
   if (global.__SLACK_CHAT_STORE_V4__ && global.__SLACK_CHAT_STORE_V4__.epoch === CURRENT_EPOCH) {
+    if (!global.__SLACK_CHAT_STORE_V4__.version) {
+      global.__SLACK_CHAT_STORE_V4__.version = 1;
+    }
     return global.__SLACK_CHAT_STORE_V4__;
   }
   try {
@@ -30,6 +35,7 @@ function loadStore() {
         parsed.users &&
         Array.isArray(parsed.messages)
       ) {
+        if (!parsed.version) parsed.version = 1;
         global.__SLACK_CHAT_STORE_V4__ = parsed;
         return parsed;
       }
@@ -40,6 +46,10 @@ function loadStore() {
   global.__SLACK_CHAT_STORE_V4__ = initial;
   saveStore(initial);
   return initial;
+}
+
+function bumpVersion(store) {
+  store.version = (Number(store.version) || 1) + 1;
 }
 
 function saveStore(store) {
@@ -67,7 +77,7 @@ function mergeClientSnapshot(store, snapshot) {
   if (Array.isArray(snapshot.deletedIds) && snapshot.deletedIds.length > 0) {
     const prevLen = (store.deletedIds || []).length;
     const delSet = new Set([...(store.deletedIds || []), ...snapshot.deletedIds]);
-    store.deletedIds = Array.from(delSet).slice(-1000);
+    store.deletedIds = Array.from(delSet).slice(-500);
     const prevMsgLen = store.messages.length;
     store.messages = store.messages.filter((m) => !delSet.has(m.id));
     if (store.deletedIds.length !== prevLen || store.messages.length !== prevMsgLen) {
@@ -141,17 +151,57 @@ function mergeClientSnapshot(store, snapshot) {
     }
     store.messages = Array.from(byId.values())
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-      .slice(-1000);
+      .slice(-500);
   }
 
+  if (modified) {
+    bumpVersion(store);
+  }
   return modified;
 }
 
-function buildDeltaResponse(store, clientMeta) {
-  const knownIdsSet = new Set(
-    clientMeta && Array.isArray(clientMeta.knownMessageIds) ? clientMeta.knownMessageIds : []
-  );
+function buildDeltaResponse(store, clientMeta, activeUserId) {
+  const serverVersion = Number(store.version) || 1;
+  const clientVersion = (clientMeta && Number(clientMeta.sinceVersion)) || 0;
   const sinceMs = (clientMeta && Number(clientMeta.sinceUpdatedAt)) || 0;
+  const serverUserCount = Object.keys(store.users).length;
+  const serverMessageCount = store.messages.length;
+
+  // Check if someone OTHER than the requesting user is currently typing
+  const activeTyping = {};
+  let hasPartnerTyping = false;
+  for (const [uid, t] of Object.entries(store.typing || {})) {
+    if (uid !== activeUserId) {
+      activeTyping[uid] = t;
+      hasPartnerTyping = true;
+    }
+  }
+
+  // Ultra-lightweight short-circuit (~85 bytes) when nothing changed since last poll!
+  if (
+    clientVersion > 0 &&
+    clientVersion === serverVersion &&
+    !hasPartnerTyping &&
+    (clientMeta.localMessageCount === undefined ||
+      clientMeta.localMessageCount === serverMessageCount)
+  ) {
+    return {
+      ok: true,
+      noop: true,
+      epoch: CURRENT_EPOCH,
+      version: serverVersion,
+      resetAt: store.resetAt || 0,
+      clearedAt: store.clearedAt || 0,
+      serverUserCount,
+      serverMessageCount
+    };
+  }
+
+  const knownIdsSet =
+    clientMeta && Array.isArray(clientMeta.knownMessageIds)
+      ? new Set(clientMeta.knownMessageIds)
+      : null;
+
   const knownUserUpdated =
     (clientMeta && typeof clientMeta.userUpdatedMap === "object" && clientMeta.userUpdatedMap) ||
     {};
@@ -172,37 +222,61 @@ function buildDeltaResponse(store, clientMeta) {
     return u;
   });
 
-  // Only send messages that the client doesn't have yet, OR lightweight reaction updates
+  // Only send messages that are new or updated since sinceMs
   const deltaMessages = [];
   for (const m of store.messages) {
-    if (!knownIdsSet.has(m.id)) {
+    const createdMs = new Date(m.created_at).getTime() || 0;
+    const updatedMs = m.updated_at || createdMs;
+
+    if (knownIdsSet) {
+      if (!knownIdsSet.has(m.id)) {
+        deltaMessages.push(m);
+      } else if (updatedMs > sinceMs) {
+        deltaMessages.push({
+          id: m.id,
+          sender_id: m.sender_id,
+          receiver_id: m.receiver_id,
+          content: m.content,
+          reactions: m.reactions || {},
+          created_at: m.created_at,
+          updated_at: m.updated_at,
+          _lightDelta: true
+        });
+      }
+    } else if (sinceMs > 0) {
+      // Timestamp-based delta (no need for client to upload knownMessageIds on every poll)
+      if (createdMs > sinceMs) {
+        deltaMessages.push(m);
+      } else if (updatedMs > sinceMs) {
+        deltaMessages.push({
+          id: m.id,
+          sender_id: m.sender_id,
+          receiver_id: m.receiver_id,
+          content: m.content,
+          reactions: m.reactions || {},
+          created_at: m.created_at,
+          updated_at: m.updated_at,
+          _lightDelta: true
+        });
+      }
+    } else {
       deltaMessages.push(m);
-    } else if ((m.updated_at || 0) > sinceMs) {
-      // Client already has this message's media; only send updated reactions & metadata
-      deltaMessages.push({
-        id: m.id,
-        sender_id: m.sender_id,
-        receiver_id: m.receiver_id,
-        content: m.content,
-        reactions: m.reactions || {},
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-        _lightDelta: true
-      });
     }
   }
 
   return {
     ok: true,
+    noop: false,
     epoch: CURRENT_EPOCH,
+    version: serverVersion,
     resetAt: store.resetAt || 0,
     clearedAt: store.clearedAt || 0,
-    deletedIds: store.deletedIds || [],
-    serverUserCount: Object.keys(store.users).length,
-    serverMessageCount: store.messages.length,
+    deletedIds: (store.deletedIds || []).slice(-200),
+    serverUserCount,
+    serverMessageCount,
     users: deltaUsers,
     messages: deltaMessages,
-    typing: store.typing
+    typing: activeTyping
   };
 }
 
@@ -228,7 +302,7 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === "GET") {
-    return res.status(200).json(buildDeltaResponse(store, null));
+    return res.status(200).json(buildDeltaResponse(store, null, null));
   }
 
   if (req.method === "POST") {
@@ -244,12 +318,43 @@ module.exports = async (req, res) => {
 
     const { action, activeUserId, snapshot, clientMeta } = body;
 
+    // Direct-to-Cloud Signed Upload helper (0 origin bandwidth for media transfer)
+    if (action === "sign_upload") {
+      const cloudName = process.env.CLOUDINARY_CLOUD_NAME || body.cloudName || "";
+      const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET || body.uploadPreset || "";
+      const apiKey = process.env.CLOUDINARY_API_KEY || "";
+      const apiSecret = process.env.CLOUDINARY_API_SECRET || "";
+
+      if (cloudName && apiKey && apiSecret) {
+        const timestamp = Math.floor(now / 1000);
+        const folder = "slack_chat";
+        const strToSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+        const signature = crypto.createHash("sha1").update(strToSign).digest("hex");
+        return res.status(200).json({
+          ok: true,
+          provider: "cloudinary-signed",
+          uploadUrl: `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`,
+          params: { api_key: apiKey, timestamp, folder, signature }
+        });
+      }
+      if (cloudName && uploadPreset) {
+        return res.status(200).json({
+          ok: true,
+          provider: "cloudinary-unsigned",
+          uploadUrl: `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`,
+          params: { upload_preset: uploadPreset }
+        });
+      }
+      return res.status(200).json({ ok: false, fallbackInline: true });
+    }
+
     if (action === "reset_all") {
       const fresh = getDefaultStore();
       fresh.resetAt = now;
       fresh.clearedAt = now;
+      bumpVersion(fresh);
       saveStore(fresh);
-      return res.status(200).json(buildDeltaResponse(fresh, null));
+      return res.status(200).json(buildDeltaResponse(fresh, null, activeUserId));
     }
 
     let modified = false;
@@ -285,6 +390,7 @@ module.exports = async (req, res) => {
         updated_at: now,
         last_seen: nowIso
       };
+      bumpVersion(store);
       saveStore(store);
     } else if (action === "login") {
       const cleanUsername = String(body.username || "")
@@ -323,9 +429,10 @@ module.exports = async (req, res) => {
           created_at: msg.created_at || nowIso,
           updated_at: now
         });
-        if (store.messages.length > 1000) {
-          store.messages = store.messages.slice(-1000);
+        if (store.messages.length > 500) {
+          store.messages = store.messages.slice(-500);
         }
+        bumpVersion(store);
       }
       if (msg.sender_id && store.typing[msg.sender_id]) {
         delete store.typing[msg.sender_id];
@@ -333,14 +440,16 @@ module.exports = async (req, res) => {
       saveStore(store);
     } else if (action === "delete_message" && body.messageId) {
       const msgId = String(body.messageId);
-      store.deletedIds = Array.from(new Set([...(store.deletedIds || []), msgId])).slice(-1000);
+      store.deletedIds = Array.from(new Set([...(store.deletedIds || []), msgId])).slice(-500);
       store.messages = store.messages.filter((m) => m.id !== msgId);
+      bumpVersion(store);
       saveStore(store);
     } else if (action === "toggle_reaction" && body.messageId) {
       const msg = store.messages.find((m) => m.id === body.messageId);
       if (msg && body.reactions) {
         msg.reactions = body.reactions;
         msg.updated_at = now;
+        bumpVersion(store);
         saveStore(store);
       }
     } else if (action === "update_profile" && body.user && body.user.id) {
@@ -369,6 +478,7 @@ module.exports = async (req, res) => {
         updated_at: now,
         last_seen: nowIso
       };
+      bumpVersion(store);
       saveStore(store);
     } else if (action === "typing" && body.userId) {
       const uid = String(body.userId);
@@ -380,12 +490,13 @@ module.exports = async (req, res) => {
     } else if (action === "clear_chat") {
       store.clearedAt = now;
       store.messages = [];
+      bumpVersion(store);
       saveStore(store);
     } else if (modified) {
       saveStore(store);
     }
 
-    return res.status(200).json(buildDeltaResponse(store, clientMeta));
+    return res.status(200).json(buildDeltaResponse(store, clientMeta, activeUserId));
   }
 
   return res.status(405).json({ error: "Method not allowed" });

@@ -30,6 +30,12 @@ module.exports = async (req, res) => {
   const region = ((req.query && req.query.region) || "US").toUpperCase().slice(0, 2);
   const refresh = req.query && req.query.refresh === "1";
 
+  if (!refresh) {
+    res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=3600");
+  } else {
+    res.setHeader("Cache-Control", "no-store");
+  }
+
   try {
     // 1. Resolve a single TikTok video URL if provided
     if (urlParam) {
@@ -49,9 +55,9 @@ module.exports = async (req, res) => {
       return res.status(400).json({ ok: false, error: "Could not load that TikTok URL." });
     }
 
-    // 2. Return cached feed if fresh (< 8 seconds) and not explicitly refreshing
+    // 2. Return cached feed if fresh (< 5 minutes) and not explicitly refreshing
     const now = Date.now();
-    if (!refresh && cacheByRegion[region] && now - cacheByRegion[region].timestamp < 8000) {
+    if (!refresh && cacheByRegion[region] && now - cacheByRegion[region].timestamp < 300000) {
       return res.status(200).json({
         ok: true,
         videos: cacheByRegion[region].videos

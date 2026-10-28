@@ -113,7 +113,7 @@
     });
   }
 
-  function compressImageFile(file, maxSize = 180, quality = 0.84) {
+  function compressImageFile(file, maxSize = 180, quality = 0.72) {
     return new Promise((resolve, reject) => {
       if (!file || !file.type.startsWith("image/")) {
         reject(new Error("Please select a valid image file."));
@@ -146,7 +146,13 @@
             const ctx = canvas.getContext("2d");
             ctx.drawImage(img, 0, 0, width, height);
           }
-          resolve(canvas.toDataURL("image/jpeg", quality));
+          // Prefer WebP (~60% smaller than JPEG) with automatic JPEG fallback
+          const webpUrl = canvas.toDataURL("image/webp", quality);
+          if (webpUrl && webpUrl.startsWith("data:image/webp")) {
+            resolve(webpUrl);
+          } else {
+            resolve(canvas.toDataURL("image/jpeg", quality));
+          }
         };
         img.onerror = () => reject(new Error("Could not process image."));
         img.src = e.target.result;
@@ -154,6 +160,57 @@
       reader.onerror = () => reject(new Error("Error reading file."));
       reader.readAsDataURL(file);
     });
+  }
+
+  // Direct-to-Cloud Media Offload (0 bytes through Vercel Origin when configured)
+  async function uploadMediaDirectToCloud(fileOrBlob, defaultName = "attachment") {
+    try {
+      let localCfg = null;
+      try {
+        const raw = localStorage.getItem("slack_v4_cloud_cfg");
+        if (raw) localCfg = JSON.parse(raw);
+      } catch (_) {}
+
+      const cloudName = (localCfg && localCfg.cloudName) || "";
+      const uploadPreset = (localCfg && localCfg.uploadPreset) || "";
+
+      // 1. Direct browser-to-Cloudinary unsigned upload (if configured in localStorage)
+      if (cloudName && uploadPreset) {
+        const fd = new FormData();
+        fd.append("file", fileOrBlob, defaultName);
+        fd.append("upload_preset", uploadPreset);
+        const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`, {
+          method: "POST",
+          body: fd
+        });
+        const data = await res.json();
+        if (data && data.secure_url) return data.secure_url;
+      }
+
+      // 2. Ask /api/chat for a lightweight 150-byte signature if env vars exist on Vercel
+      if (window.location.protocol !== "file:") {
+        const signRes = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "sign_upload" })
+        });
+        const signData = await signRes.json();
+        if (signData && signData.ok && signData.uploadUrl && signData.params) {
+          const fd = new FormData();
+          for (const [k, v] of Object.entries(signData.params)) {
+            fd.append(k, v);
+          }
+          fd.append("file", fileOrBlob, defaultName);
+          const upRes = await fetch(signData.uploadUrl, {
+            method: "POST",
+            body: fd
+          });
+          const upJson = await upRes.json();
+          if (upJson && upJson.secure_url) return upJson.secure_url;
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   async function hashPassword(password, usernameSalt) {
@@ -345,36 +402,52 @@
     pollTimer: null,
     partnerTypingTimeout: null,
     lastTypingSentAt: 0,
-    syncInFlight: false
+    syncInFlight: false,
+    serverVersion: 0,
+    lastActivityAt: Date.now()
   };
 
+  function markUserActivity() {
+    state.lastActivityAt = Date.now();
+  }
+
+  function stripHeavyInlineMediaForSnapshot(m) {
+    const isHeavyDataUrl = (val) =>
+      typeof val === "string" && val.startsWith("data:") && val.length > 48000;
+    return {
+      ...m,
+      image_url: isHeavyDataUrl(m.image_url) ? null : m.image_url || null,
+      video_url: isHeavyDataUrl(m.video_url) ? null : m.video_url || null,
+      audio_url: isHeavyDataUrl(m.audio_url) ? null : m.audio_url || null
+    };
+  }
+
   function getSafeSnapshotForVercel() {
-    // Keep snapshot safely under Vercel's 4.5 MB limit (~3.2 MB max)
+    // Ultra-compact cold-start hydration snapshot (< 240 KB max to protect Fast Origin Transfer)
     const users = state.store.users;
     const allMsgs = state.store.messages || [];
     const selectedMsgs = [];
     let bytes = JSON.stringify(users).length;
 
     for (let i = allMsgs.length - 1; i >= 0; i--) {
-      const m = allMsgs[i];
+      const m = stripHeavyInlineMediaForSnapshot(allMsgs[i]);
       const msgSize = JSON.stringify(m).length;
-      if (bytes + msgSize < 3200000) {
+      if (bytes + msgSize < 240000) {
         selectedMsgs.unshift(m);
         bytes += msgSize;
       } else {
-        // Include message text without heavy media if needed
-        const lightMsg = { ...m, image_url: null, video_url: null, audio_url: null };
-        selectedMsgs.unshift(lightMsg);
-        bytes += JSON.stringify(lightMsg).length;
+        const textOnly = { ...m, image_url: null, video_url: null, audio_url: null };
+        selectedMsgs.unshift(textOnly);
+        bytes += JSON.stringify(textOnly).length;
       }
-      if (selectedMsgs.length >= 400) break;
+      if (selectedMsgs.length >= 80 || bytes >= 260000) break;
     }
 
     return {
       epoch: CURRENT_EPOCH,
       resetAt: state.store.resetAt || 0,
       clearedAt: state.store.clearedAt || 0,
-      deletedIds: (state.store.deletedIds || []).slice(-500),
+      deletedIds: (state.store.deletedIds || []).slice(-150),
       users,
       messages: selectedMsgs
     };
@@ -382,6 +455,15 @@
 
   function applyIncomingState(incoming) {
     if (!incoming) return false;
+    if (typeof incoming.version === "number" && incoming.version > 0) {
+      state.serverVersion = incoming.version;
+    }
+
+    // Short-circuit: server confirmed 0 changes since our known version (~85 byte response)
+    if (incoming.noop === true) {
+      return false;
+    }
+
     let messagesOrProfilesChanged = false;
     let presenceOnlyChanged = false;
 
@@ -396,7 +478,7 @@
     if (Array.isArray(incoming.deletedIds) && incoming.deletedIds.length > 0) {
       const prevLen = (state.store.deletedIds || []).length;
       const delSet = new Set([...(state.store.deletedIds || []), ...incoming.deletedIds]);
-      state.store.deletedIds = Array.from(delSet).slice(-1000);
+      state.store.deletedIds = Array.from(delSet).slice(-500);
       const beforeMsgLen = state.store.messages.length;
       state.store.messages = state.store.messages.filter((m) => !delSet.has(m.id));
       if (state.store.deletedIds.length !== prevLen || state.store.messages.length !== beforeMsgLen) {
@@ -453,6 +535,7 @@
         if (!existing) {
           byId.set(m.id, m);
           messagesOrProfilesChanged = true;
+          markUserActivity();
         } else if ((m.updated_at || 0) > (existing.updated_at || 0)) {
           if (JSON.stringify(existing.reactions) !== JSON.stringify(m.reactions)) {
             messagesOrProfilesChanged = true;
@@ -474,7 +557,7 @@
 
       state.store.messages = Array.from(byId.values())
         .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-        .slice(-1000);
+        .slice(-500);
     }
 
     if (state.currentUser && state.store.users[state.currentUser.id]) {
@@ -487,6 +570,7 @@
         const t = incoming.typing[partner.id];
         if (Date.now() - (t.timestamp || 0) < 3500) {
           showPartnerTyping(t.displayName);
+          markUserActivity();
         }
       }
     }
@@ -511,14 +595,15 @@
     }
   }
 
-  function buildClientMeta() {
-    const knownMessageIds = [];
+  function buildClientMeta(includeIds = false) {
     let sinceUpdatedAt = 0;
+    const knownMessageIds = includeIds ? [] : undefined;
     for (const m of state.store.messages) {
       if (!m || !m.id) continue;
-      knownMessageIds.push(m.id);
-      if ((m.updated_at || 0) > sinceUpdatedAt) {
-        sinceUpdatedAt = m.updated_at;
+      if (includeIds) knownMessageIds.push(m.id);
+      const ts = m.updated_at || new Date(m.created_at).getTime() || 0;
+      if (ts > sinceUpdatedAt) {
+        sinceUpdatedAt = ts;
       }
     }
     const userUpdatedMap = {};
@@ -528,8 +613,10 @@
       }
     }
     return {
-      knownMessageIds,
+      sinceVersion: state.serverVersion || 0,
       sinceUpdatedAt,
+      localMessageCount: state.store.messages.length,
+      knownMessageIds,
       userUpdatedMap
     };
   }
@@ -537,10 +624,11 @@
   async function callVercelApi(payload, includeSnapshot = false) {
     if (window.location.protocol === "file:") return { ok: true, localOnly: true };
     try {
+      const isInitialOrMutating = payload.action !== "sync" || state.serverVersion === 0;
       const bodyObj = {
         ...payload,
         activeUserId: state.currentUser ? state.currentUser.id : null,
-        clientMeta: buildClientMeta()
+        clientMeta: buildClientMeta(isInitialOrMutating)
       };
       if (includeSnapshot) {
         bodyObj.snapshot = getSafeSnapshotForVercel();
@@ -569,11 +657,11 @@
           renderAll(true);
         }
 
-        // Only re-hydrate if the Vercel instance cold-started (with a 15s cooldown so it never stalls polling)
+        // Only re-hydrate if the Vercel instance truly cold-started (with a 30s cooldown)
         const now = Date.now();
         if (
           !includeSnapshot &&
-          now - (state.lastRehydrateAt || 0) > 15000 &&
+          now - (state.lastRehydrateAt || 0) > 30000 &&
           (serverUserCount < localUserCount || (serverMsgCount === 0 && localMsgCount > 0))
         ) {
           state.lastRehydrateAt = now;
@@ -584,6 +672,30 @@
     } catch (_) {
       return { ok: true, localOnly: true };
     }
+  }
+
+  function getAdaptivePollIntervalMs() {
+    const idleMs = Date.now() - (state.lastActivityAt || 0);
+    if (idleMs < 25000) return 2000; // Active chat: 2s
+    if (idleMs < 120000) return 5000; // Warm idle: 5s
+    return 12000; // Deep idle: 12s
+  }
+
+  function scheduleNextPoll() {
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    if (document.hidden) return; // 0 network requests while tab is in background
+    const delay = getAdaptivePollIntervalMs();
+    state.pollTimer = setTimeout(async () => {
+      if (!document.hidden && !state.syncInFlight && state.currentUser) {
+        state.syncInFlight = true;
+        try {
+          await callVercelApi({ action: "sync" }, false);
+        } finally {
+          state.syncInFlight = false;
+        }
+      }
+      scheduleNextPoll();
+    }, delay);
   }
 
   function startRealtimeSync() {
@@ -605,28 +717,35 @@
       };
     }
 
-    window.addEventListener("focus", () => {
-      if (state.currentUser && !state.syncInFlight) {
+    const onWakeUp = () => {
+      markUserActivity();
+      if (!document.hidden && state.currentUser && !state.syncInFlight) {
         callVercelApi({ action: "sync" }, false);
+      }
+      scheduleNextPoll();
+    };
+
+    window.addEventListener("focus", onWakeUp);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        if (state.pollTimer) clearTimeout(state.pollTimer);
+      } else {
+        onWakeUp();
       }
     });
 
-    if (state.pollTimer) clearInterval(state.pollTimer);
-    state.pollTimer = setInterval(async () => {
-      if (document.hidden || state.syncInFlight || !state.currentUser) return;
-      state.syncInFlight = true;
-      try {
-        await callVercelApi({ action: "sync" }, false);
-      } finally {
-        state.syncInFlight = false;
-      }
-    }, 800);
+    ["keydown", "mousedown", "touchstart"].forEach((evt) => {
+      window.addEventListener(evt, markUserActivity, { passive: true });
+    });
+
+    scheduleNextPoll();
   }
 
   function sendTypingSignal() {
     if (!state.currentUser) return;
+    markUserActivity();
     const now = Date.now();
-    if (now - state.lastTypingSentAt < 900) return;
+    if (now - state.lastTypingSentAt < 2500) return;
     state.lastTypingSentAt = now;
 
     if (state.localChannel) {
@@ -725,8 +844,8 @@
     submitBtn.disabled = true;
 
     try {
-      // Sync latest accounts from server first
-      await callVercelApi({ action: "sync" }, true);
+      // Sync latest accounts from server first (without uploading heavy snapshot)
+      await callVercelApi({ action: "sync" }, false);
 
       const passwordHash = await hashPassword(password, username);
       const userId = deterministicUserId(username);
@@ -742,7 +861,7 @@
             username,
             password_hash: passwordHash
           },
-          true
+          false
         );
 
         const resolvedUser =
@@ -791,7 +910,7 @@
             action: "register",
             user: newUser
           },
-          true
+          false
         );
 
         if (apiRes && apiRes.ok === false && apiRes.error) {
@@ -810,7 +929,7 @@
     }
   }
 
-  async function completeLogin(user, rememberMe = true) {
+  async function completeLogin(user, rememberMe = true, skipSync = false) {
     state.currentUser = user;
     state.store.users[user.id] = user;
 
@@ -826,7 +945,9 @@
 
     selectDefaultPartnerIfNeeded();
     renderAll(false);
-    await callVercelApi({ action: "sync" }, true);
+    if (!skipSync) {
+      await callVercelApi({ action: "sync" }, false);
+    }
     document.getElementById("composer-input").focus();
   }
 
@@ -1390,9 +1511,11 @@
   async function attachImageFileToComposer(file) {
     if (!file) return;
     try {
-      const dataUrl = await compressImageFile(file, 720, 0.82);
-      state.pendingAttachment = dataUrl;
-      document.getElementById("composer-attachment-img").src = dataUrl;
+      // 1. Try direct-to-cloud upload first (0 bytes through Vercel Origin)
+      const cloudUrl = await uploadMediaDirectToCloud(file, file.name || "image.webp");
+      const finalUrl = cloudUrl || (await compressImageFile(file, 640, 0.68));
+      state.pendingAttachment = finalUrl;
+      document.getElementById("composer-attachment-img").src = finalUrl;
       document.getElementById("composer-attachment-preview").classList.remove("hidden");
       updateSendButtonState();
       document.getElementById("composer-input").focus();
@@ -1419,9 +1542,9 @@
       video.playsInline = true;
 
       video.onloadedmetadata = () => {
-        const maxDim = 360;
-        let w = video.videoWidth || 360;
-        let h = video.videoHeight || 640;
+        const maxDim = 280;
+        let w = video.videoWidth || 280;
+        let h = video.videoHeight || 500;
         if (w > maxDim || h > maxDim) {
           const ratio = Math.min(maxDim / w, maxDim / h);
           w = Math.max(2, Math.round((w * ratio) / 2) * 2);
@@ -1435,17 +1558,17 @@
 
         if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
           URL.revokeObjectURL(url);
-          reject(new Error("Please select a video file under 3 MB."));
+          reject(new Error("Please select a video file under 1.5 MB."));
           return;
         }
 
-        const stream = canvas.captureStream(20);
+        const stream = canvas.captureStream(18);
         const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
           ? "video/webm;codecs=vp8"
           : "video/webm";
         const recorder = new MediaRecorder(stream, {
           mimeType: mime,
-          videoBitsPerSecond: 400000
+          videoBitsPerSecond: 250000
         });
 
         const chunks = [];
@@ -1478,7 +1601,7 @@
         };
 
         video.onended = stopCapture;
-        setTimeout(stopCapture, Math.min((video.duration || 15) * 1000, 18000));
+        setTimeout(stopCapture, Math.min((video.duration || 12) * 1000, 14000));
 
         video.play().catch((err) => {
           URL.revokeObjectURL(url);
@@ -1509,14 +1632,21 @@
 
     try {
       previewBox.classList.remove("hidden");
-      if (file.size <= 2.9 * 1024 * 1024) {
+      statusBadge.textContent = "Uploading / optimizing video...";
+      statusBadge.classList.remove("hidden");
+
+      // 1. Try direct-to-cloud upload first (0 bytes through Vercel Origin)
+      const cloudUrl = await uploadMediaDirectToCloud(file, file.name || "video.mp4");
+      if (cloudUrl) {
+        statusBadge.classList.add("hidden");
+        state.pendingVideoUrl = cloudUrl;
+        videoEl.src = cloudUrl;
+      } else if (file.size <= 680 * 1024) {
         statusBadge.classList.add("hidden");
         const dataUrl = await readFileAsDataUrl(file);
         state.pendingVideoUrl = dataUrl;
         videoEl.src = dataUrl;
       } else {
-        statusBadge.textContent = "Optimizing video for chat...";
-        statusBadge.classList.remove("hidden");
         const dataUrl = await compressVideoBlobInBrowser(file);
         statusBadge.classList.add("hidden");
         state.pendingVideoUrl = dataUrl;
@@ -1810,7 +1940,7 @@
       state.recordingStartedAt = Date.now();
 
       const mimeType = pickSupportedAudioMimeType();
-      const options = { audioBitsPerSecond: 24000 };
+      const options = { audioBitsPerSecond: 18000 };
       if (mimeType) options.mimeType = mimeType;
 
       const recorder = new MediaRecorder(stream, options);
@@ -1822,7 +1952,7 @@
         }
       };
 
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const durationSec = Math.max(1, Math.round((Date.now() - state.recordingStartedAt) / 1000));
         const chunks = state.recordingChunks.slice();
         const shouldSendNow = state.sendImmediatelyOnStop;
@@ -1831,6 +1961,23 @@
         if (chunks.length === 0) return;
 
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const cloudUrl = await uploadMediaDirectToCloud(blob, "voice.webm");
+        if (cloudUrl) {
+          state.pendingAudioUrl = cloudUrl;
+          state.pendingAudioDuration = durationSec;
+          if (shouldSendNow) {
+            await handleSendMessage();
+          } else {
+            const audioEl = document.getElementById("composer-audio-player");
+            const previewBar = document.getElementById("composer-audio-preview");
+            audioEl.src = cloudUrl;
+            previewBar.classList.remove("hidden");
+            updateSendButtonState();
+            document.getElementById("composer-input").focus();
+          }
+          return;
+        }
+
         const reader = new FileReader();
         reader.onload = async (ev) => {
           const dataUrl = ev.target.result;
@@ -2355,7 +2502,19 @@
   }
 
   async function fetchMiniTikTokBatch(region, forceRefresh = false) {
-    // 1. Try Vercel /api/tiktok first
+    // 1. Direct browser fetch to tikwm CORS endpoint FIRST (0 bytes of Vercel Fast Origin Transfer)
+    try {
+      const res = await fetch(
+        `https://www.tikwm.com/api/feed/list?region=${encodeURIComponent(region)}&count=10`
+      );
+      const json = await res.json();
+      if (json && json.code === 0 && Array.isArray(json.data)) {
+        const list = json.data.map(normalizeTikwmVideo).filter(Boolean);
+        if (list.length > 0) return list;
+      }
+    } catch (_) {}
+
+    // 2. Fallback to Edge-cached /api/tiktok
     if (window.location.protocol !== "file:") {
       try {
         const res = await fetch(
@@ -2370,21 +2529,23 @@
       } catch (_) {}
     }
 
-    // 2. Direct browser fallback to tikwm CORS endpoint
-    try {
-      const res = await fetch(
-        `https://www.tikwm.com/api/feed/list?region=${encodeURIComponent(region)}&count=10`
-      );
-      const json = await res.json();
-      if (json && json.code === 0 && Array.isArray(json.data)) {
-        return json.data.map(normalizeTikwmVideo).filter(Boolean);
-      }
-    } catch (_) {}
-
     return [];
   }
 
   async function resolveSingleTikTokUrl(rawUrl) {
+    // 1. Direct browser resolution FIRST (0 bytes of Vercel Fast Origin Transfer)
+    try {
+      const res = await fetch(
+        `https://www.tikwm.com/api/?url=${encodeURIComponent(rawUrl)}`
+      );
+      const json = await res.json();
+      if (json && json.code === 0 && json.data) {
+        const v = normalizeTikwmVideo(json.data);
+        if (v) return v;
+      }
+    } catch (_) {}
+
+    // 2. Fallback to /api/tiktok
     if (window.location.protocol !== "file:") {
       try {
         const res = await fetch(`/api/tiktok?url=${encodeURIComponent(rawUrl)}`);
@@ -2396,15 +2557,6 @@
         }
       } catch (_) {}
     }
-    try {
-      const res = await fetch(
-        `https://www.tikwm.com/api/?url=${encodeURIComponent(rawUrl)}`
-      );
-      const json = await res.json();
-      if (json && json.code === 0 && json.data) {
-        return normalizeTikwmVideo(json.data);
-      }
-    } catch (_) {}
     return null;
   }
 
@@ -2737,16 +2889,16 @@
     }
 
     startRealtimeSync();
-    await callVercelApi({ action: "sync" }, true);
+    await callVercelApi({ action: "sync" }, false);
 
-    // Auto-restore remembered login
+    // Auto-restore remembered login (skip redundant second sync call)
     const rememberedUid =
       sessionStorage.getItem(STORAGE_KEYS.SESSION_UID_TAB) ||
       localStorage.getItem(STORAGE_KEYS.REMEMBER_UID_LOCAL);
 
     if (rememberedUid && state.store.users[rememberedUid]) {
       const isPersistent = Boolean(localStorage.getItem(STORAGE_KEYS.REMEMBER_UID_LOCAL));
-      await completeLogin(state.store.users[rememberedUid], isPersistent);
+      await completeLogin(state.store.users[rememberedUid], isPersistent, true);
     } else if (Object.keys(state.store.users).length === 0) {
       switchAuthTab("register");
     }
