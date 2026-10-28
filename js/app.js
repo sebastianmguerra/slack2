@@ -381,14 +381,15 @@
 
   function applyIncomingState(incoming) {
     if (!incoming) return false;
-    let changed = false;
+    let messagesOrProfilesChanged = false;
+    let presenceOnlyChanged = false;
 
     if (typeof incoming.clearedAt === "number" && incoming.clearedAt > (state.store.clearedAt || 0)) {
       state.store.clearedAt = incoming.clearedAt;
       state.store.messages = state.store.messages.filter(
         (m) => new Date(m.created_at).getTime() > state.store.clearedAt
       );
-      changed = true;
+      messagesOrProfilesChanged = true;
     }
 
     if (Array.isArray(incoming.deletedIds) && incoming.deletedIds.length > 0) {
@@ -398,7 +399,7 @@
       const beforeMsgLen = state.store.messages.length;
       state.store.messages = state.store.messages.filter((m) => !delSet.has(m.id));
       if (state.store.deletedIds.length !== prevLen || state.store.messages.length !== beforeMsgLen) {
-        changed = true;
+        messagesOrProfilesChanged = true;
       }
     }
 
@@ -417,10 +418,11 @@
           cur.display_name !== u.display_name ||
           cur.username !== u.username ||
           cur.avatar_url !== u.avatar_url ||
-          cur.status_text !== u.status_text ||
-          cur.last_seen !== u.last_seen
+          cur.status_text !== u.status_text
         ) {
-          changed = true;
+          messagesOrProfilesChanged = true;
+        } else if (cur.last_seen !== u.last_seen) {
+          presenceOnlyChanged = true;
         }
         state.store.users[u.id] = {
           ...(cur || {}),
@@ -445,10 +447,10 @@
         const existing = byId.get(m.id);
         if (!existing) {
           byId.set(m.id, m);
-          changed = true;
+          messagesOrProfilesChanged = true;
         } else if ((m.updated_at || 0) > (existing.updated_at || 0)) {
           if (JSON.stringify(existing.reactions) !== JSON.stringify(m.reactions)) {
-            changed = true;
+            messagesOrProfilesChanged = true;
           }
           // Preserve local media if server had stripped it
           byId.set(m.id, {
@@ -461,7 +463,7 @@
       }
 
       if (byId.size !== state.store.messages.length) {
-        changed = true;
+        messagesOrProfilesChanged = true;
       }
 
       state.store.messages = Array.from(byId.values())
@@ -483,10 +485,14 @@
       }
     }
 
-    if (changed) {
+    if (messagesOrProfilesChanged) {
       idbSaveStore(state.store);
+    } else if (presenceOnlyChanged && state.currentUser) {
+      renderSidebarUsers();
+      renderChatHeader();
+      if (state.drawerOpen) renderProfileDrawer();
     }
-    return changed;
+    return messagesOrProfilesChanged;
   }
 
   async function persistAndBroadcast() {
@@ -1113,7 +1119,24 @@
       `;
     });
 
+    // Preserve any actively playing audio card DOM node across re-renders
+    const playingAudioCards = new Map();
+    viewport.querySelectorAll("[data-audio-card]").forEach((card) => {
+      const a = card.querySelector("audio");
+      if (a && !a.paused) {
+        playingAudioCards.set(card.getAttribute("data-audio-card"), card);
+      }
+    });
+
     viewport.innerHTML = html;
+
+    // Restore any actively playing audio card so playback never stops
+    playingAudioCards.forEach((liveCard, msgId) => {
+      const placeholder = viewport.querySelector(`[data-audio-card="${CSS.escape(msgId)}"]`);
+      if (placeholder && placeholder.parentNode) {
+        placeholder.parentNode.replaceChild(liveCard, placeholder);
+      }
+    });
 
     viewport.querySelectorAll("[data-profile-uid]").forEach((el) => {
       el.addEventListener("click", () => {
@@ -1160,12 +1183,26 @@
 
   function bindAudioCardPlayers(viewport) {
     viewport.querySelectorAll("[data-audio-card]").forEach((card) => {
+      if (card.getAttribute("data-bound") === "1") return;
+      card.setAttribute("data-bound", "1");
       const playBtn = card.querySelector(".msg-audio-play-btn");
       const slider = card.querySelector(".msg-audio-slider");
       const timeLabel = card.querySelector(".msg-audio-time");
       const speedBtn = card.querySelector(".msg-audio-speed-btn");
       const audioEl = card.querySelector("audio");
       if (!playBtn || !slider || !timeLabel || !speedBtn || !audioEl) return;
+
+      const msgRow = card.closest("[data-msgid]");
+      const msgId = msgRow ? msgRow.getAttribute("data-msgid") : null;
+      const msgObj = msgId ? state.store.messages.find((m) => m.id === msgId) : null;
+      const fallbackDuration = (msgObj && Number(msgObj.audio_duration)) || 1;
+
+      const getEffectiveDuration = () => {
+        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+          return audioEl.duration;
+        }
+        return fallbackDuration;
+      };
 
       audioEl.addEventListener("loadedmetadata", () => {
         if (isFinite(audioEl.duration) && audioEl.duration > 0) {
@@ -1196,7 +1233,7 @@
       });
 
       audioEl.addEventListener("timeupdate", () => {
-        const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 1;
+        const dur = getEffectiveDuration();
         slider.value = String(Math.min(100, (audioEl.currentTime / dur) * 100));
         timeLabel.textContent = formatAudioSeconds(audioEl.currentTime);
       });
@@ -1204,14 +1241,13 @@
       audioEl.addEventListener("ended", () => {
         playBtn.textContent = "▶";
         slider.value = "0";
-        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
-          timeLabel.textContent = formatAudioSeconds(audioEl.duration);
-        }
+        timeLabel.textContent = formatAudioSeconds(getEffectiveDuration());
       });
 
       slider.addEventListener("input", () => {
-        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
-          audioEl.currentTime = (Number(slider.value) / 100) * audioEl.duration;
+        const dur = getEffectiveDuration();
+        if (dur > 0) {
+          audioEl.currentTime = (Number(slider.value) / 100) * dur;
         }
       });
 
@@ -1594,7 +1630,7 @@
         reader.readAsDataURL(blob);
       };
 
-      recorder.start(250);
+      recorder.start();
 
       document.getElementById("btn-record-audio").classList.add("recording-active");
       document.getElementById("recording-timer-text").textContent = "0:00";
