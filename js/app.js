@@ -1041,7 +1041,10 @@
       }
 
       const attachedImgHtml = msg.image_url
-        ? `<img class="msg-attached-image" src="${escapeHtml(msg.image_url)}" alt="Attached image" />`
+        ? `<div class="msg-image-wrap">
+             <img class="msg-attached-image" src="${escapeHtml(msg.image_url)}" alt="Attached image" />
+             <button type="button" class="msg-copy-img-btn" data-copy-img="${escapeHtml(msg.image_url)}" title="Copy image to clipboard">📋 Copy</button>
+           </div>`
         : "";
 
       html += `
@@ -1111,9 +1114,108 @@
       });
     });
 
+    viewport.querySelectorAll("[data-copy-img]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const imgSrc = btn.getAttribute("data-copy-img");
+        copyImageToClipboard(imgSrc, btn);
+      });
+    });
+
     if (!preserveScrollIfNotBottom || wasNearBottom) {
       viewport.scrollTop = viewport.scrollHeight;
     }
+  }
+
+  async function copyImageToClipboard(imgSrc, btnEl) {
+    if (!imgSrc) return;
+    const originalText = btnEl ? btnEl.textContent : "";
+    try {
+      const pngBlob = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth || img.width || 400;
+          canvas.height = img.naturalHeight || img.height || 400;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("Canvas toBlob failed"));
+          }, "image/png");
+        };
+        img.onerror = () => reject(new Error("Failed to load image for copying"));
+        img.src = imgSrc;
+      });
+
+      if (navigator.clipboard && window.ClipboardItem) {
+        await navigator.clipboard.write([
+          new ClipboardItem({ "image/png": pngBlob })
+        ]);
+      } else {
+        throw new Error("ClipboardItem not available");
+      }
+
+      if (btnEl) {
+        btnEl.textContent = "✓ Copied!";
+        btnEl.classList.add("copied");
+        setTimeout(() => {
+          btnEl.textContent = originalText;
+          btnEl.classList.remove("copied");
+        }, 1600);
+      }
+    } catch (_) {
+      try {
+        await navigator.clipboard.writeText(imgSrc);
+        if (btnEl) {
+          btnEl.textContent = "✓ Copied!";
+          btnEl.classList.add("copied");
+          setTimeout(() => {
+            btnEl.textContent = originalText;
+            btnEl.classList.remove("copied");
+          }, 1600);
+        }
+      } catch (__) {
+        alert("Right-click the image and select 'Copy image'.");
+      }
+    }
+  }
+
+  async function attachImageFileToComposer(file) {
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageFile(file, 720, 0.82);
+      state.pendingAttachment = dataUrl;
+      document.getElementById("composer-attachment-img").src = dataUrl;
+      document.getElementById("composer-attachment-preview").classList.remove("hidden");
+      updateSendButtonState();
+      document.getElementById("composer-input").focus();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
+  function extractImageFileFromClipboardData(clipboardData) {
+    if (!clipboardData) return null;
+    if (clipboardData.items) {
+      for (let i = 0; i < clipboardData.items.length; i++) {
+        const item = clipboardData.items[i];
+        if (item.type && item.type.startsWith("image/")) {
+          const f = item.getAsFile();
+          if (f) return f;
+        }
+      }
+    }
+    if (clipboardData.files && clipboardData.files.length > 0) {
+      for (let i = 0; i < clipboardData.files.length; i++) {
+        const f = clipboardData.files[i];
+        if (f.type && f.type.startsWith("image/")) {
+          return f;
+        }
+      }
+    }
+    return null;
   }
 
   // ==========================================================================
@@ -1578,21 +1680,62 @@
       });
     });
 
-    // Attach image in chat
+    // Attach image in chat (file picker, Ctrl+V paste, and drag-and-drop)
     document.getElementById("composer-image-input").addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
-      try {
-        const dataUrl = await compressImageFile(file, 720, 0.82);
-        state.pendingAttachment = dataUrl;
-        document.getElementById("composer-attachment-img").src = dataUrl;
-        document.getElementById("composer-attachment-preview").classList.remove("hidden");
-        updateSendButtonState();
-        composerInput.focus();
-      } catch (err) {
-        alert(err.message);
-      }
+      await attachImageFileToComposer(file);
     });
+
+    // Global & composer paste handler for images (Ctrl+V / Cmd+V / Right-click Paste)
+    document.addEventListener("paste", async (e) => {
+      if (!state.currentUser) return;
+      const imgFile = extractImageFileFromClipboardData(e.clipboardData);
+      if (!imgFile) return;
+
+      e.preventDefault();
+      const editModal = document.getElementById("edit-profile-modal");
+      if (editModal && !editModal.classList.contains("hidden")) {
+        try {
+          const dataUrl = await compressImageFile(imgFile, 160, 0.85);
+          state.editAvatarDataUrl = dataUrl;
+          document.getElementById("edit-avatar-preview").src = dataUrl;
+        } catch (err) {
+          alert(err.message);
+        }
+        return;
+      }
+
+      await attachImageFileToComposer(imgFile);
+    });
+
+    // Drag and drop images into chat
+    const composerBox = document.querySelector(".slack-composer");
+    const mainChatArea = document.querySelector(".slack-main");
+    if (mainChatArea && composerBox) {
+      mainChatArea.addEventListener("dragover", (e) => {
+        if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
+          e.preventDefault();
+          composerBox.classList.add("drag-over");
+        }
+      });
+      mainChatArea.addEventListener("dragleave", (e) => {
+        if (!mainChatArea.contains(e.relatedTarget)) {
+          composerBox.classList.remove("drag-over");
+        }
+      });
+      mainChatArea.addEventListener("drop", async (e) => {
+        composerBox.classList.remove("drag-over");
+        if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+        const file = Array.from(e.dataTransfer.files).find(
+          (f) => f.type && f.type.startsWith("image/")
+        );
+        if (file) {
+          e.preventDefault();
+          await attachImageFileToComposer(file);
+        }
+      });
+    }
 
     document
       .getElementById("composer-attachment-remove")
