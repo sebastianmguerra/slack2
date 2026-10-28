@@ -254,6 +254,7 @@ module.exports = async (req, res) => {
           receiver_id: msg.receiver_id ? String(msg.receiver_id) : null,
           content: String(msg.content || ""),
           image_url: msg.image_url || null,
+          video_url: msg.video_url || null,
           audio_url: msg.audio_url || null,
           audio_duration: msg.audio_duration || null,
           reactions: msg.reactions || {},

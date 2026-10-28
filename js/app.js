@@ -327,6 +327,7 @@
 
     searchQuery: "",
     pendingAttachment: null,
+    pendingVideoUrl: null,
     pendingAudioUrl: null,
     pendingAudioDuration: 0,
     isRecordingAudio: false,
@@ -362,7 +363,7 @@
         bytes += msgSize;
       } else {
         // Include message text without heavy media if needed
-        const lightMsg = { ...m, image_url: null, audio_url: null };
+        const lightMsg = { ...m, image_url: null, video_url: null, audio_url: null };
         selectedMsgs.unshift(lightMsg);
         bytes += JSON.stringify(lightMsg).length;
       }
@@ -456,6 +457,7 @@
           byId.set(m.id, {
             ...m,
             image_url: m.image_url || existing.image_url,
+            video_url: m.video_url || existing.video_url,
             audio_url: m.audio_url || existing.audio_url,
             audio_duration: m.audio_duration || existing.audio_duration
           });
@@ -1064,6 +1066,12 @@
            </div>`
         : "";
 
+      const attachedVideoHtml = msg.video_url
+        ? `<div class="msg-video-wrap" data-video-card="${escapeHtml(msg.id)}">
+             <video class="msg-attached-video" src="${escapeHtml(msg.video_url)}" controls playsinline preload="metadata"></video>
+           </div>`
+        : "";
+
       const attachedAudioHtml = msg.audio_url
         ? `<div class="msg-audio-card" data-audio-card="${escapeHtml(msg.id)}">
              <button type="button" class="msg-audio-play-btn" title="Play / Pause voice clip">▶</button>
@@ -1098,6 +1106,7 @@
             }
             <div class="msg-text">${formatSlackText(msg.content)}</div>
             ${attachedImgHtml}
+            ${attachedVideoHtml}
             ${attachedAudioHtml}
             ${reactionsHtml}
           </div>
@@ -1119,7 +1128,7 @@
       `;
     });
 
-    // Preserve any actively playing audio card DOM node across re-renders
+    // Preserve any actively playing audio or video card DOM node across re-renders
     const playingAudioCards = new Map();
     viewport.querySelectorAll("[data-audio-card]").forEach((card) => {
       const a = card.querySelector("audio");
@@ -1128,11 +1137,26 @@
       }
     });
 
+    const playingVideoCards = new Map();
+    viewport.querySelectorAll("[data-video-card]").forEach((card) => {
+      const v = card.querySelector("video");
+      if (v && !v.paused) {
+        playingVideoCards.set(card.getAttribute("data-video-card"), card);
+      }
+    });
+
     viewport.innerHTML = html;
 
-    // Restore any actively playing audio card so playback never stops
+    // Restore any actively playing audio or video card so playback never stops
     playingAudioCards.forEach((liveCard, msgId) => {
       const placeholder = viewport.querySelector(`[data-audio-card="${CSS.escape(msgId)}"]`);
+      if (placeholder && placeholder.parentNode) {
+        placeholder.parentNode.replaceChild(liveCard, placeholder);
+      }
+    });
+
+    playingVideoCards.forEach((liveCard, msgId) => {
+      const placeholder = viewport.querySelector(`[data-video-card="${CSS.escape(msgId)}"]`);
       if (placeholder && placeholder.parentNode) {
         placeholder.parentNode.replaceChild(liveCard, placeholder);
       }
@@ -1331,12 +1355,141 @@
     }
   }
 
-  function extractImageFileFromClipboardData(clipboardData) {
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = () => reject(new Error("Could not read video file."));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function compressVideoBlobInBrowser(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const video = document.createElement("video");
+      video.src = url;
+      video.muted = true;
+      video.playsInline = true;
+
+      video.onloadedmetadata = () => {
+        const maxDim = 360;
+        let w = video.videoWidth || 360;
+        let h = video.videoHeight || 640;
+        if (w > maxDim || h > maxDim) {
+          const ratio = Math.min(maxDim / w, maxDim / h);
+          w = Math.max(2, Math.round((w * ratio) / 2) * 2);
+          h = Math.max(2, Math.round((h * ratio) / 2) * 2);
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+
+        if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
+          URL.revokeObjectURL(url);
+          reject(new Error("Please select a video file under 3 MB."));
+          return;
+        }
+
+        const stream = canvas.captureStream(20);
+        const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
+          ? "video/webm;codecs=vp8"
+          : "video/webm";
+        const recorder = new MediaRecorder(stream, {
+          mimeType: mime,
+          videoBitsPerSecond: 400000
+        });
+
+        const chunks = [];
+        recorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+        };
+
+        recorder.onstop = () => {
+          URL.revokeObjectURL(url);
+          const outBlob = new Blob(chunks, { type: mime });
+          readFileAsDataUrl(outBlob).then(resolve).catch(reject);
+        };
+
+        let rafId = null;
+        const drawFrame = () => {
+          if (video.paused || video.ended) return;
+          ctx.drawImage(video, 0, 0, w, h);
+          rafId = requestAnimationFrame(drawFrame);
+        };
+
+        video.onplay = () => {
+          recorder.start();
+          drawFrame();
+        };
+
+        const stopCapture = () => {
+          if (rafId) cancelAnimationFrame(rafId);
+          if (recorder.state !== "inactive") recorder.stop();
+          video.pause();
+        };
+
+        video.onended = stopCapture;
+        setTimeout(stopCapture, Math.min((video.duration || 15) * 1000, 18000));
+
+        video.play().catch((err) => {
+          URL.revokeObjectURL(url);
+          reject(err);
+        });
+      };
+
+      video.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Invalid video file."));
+      };
+    });
+  }
+
+  async function attachVideoFileToComposer(file) {
+    if (!file || !file.type || !file.type.startsWith("video/")) {
+      alert("Please select a valid video file.");
+      return;
+    }
+    if (file.size > 28 * 1024 * 1024) {
+      alert("Please select a video smaller than 28 MB.");
+      return;
+    }
+
+    const previewBox = document.getElementById("composer-video-preview");
+    const videoEl = document.getElementById("composer-attachment-video");
+    const statusBadge = document.getElementById("composer-video-status");
+
+    try {
+      previewBox.classList.remove("hidden");
+      if (file.size <= 2.9 * 1024 * 1024) {
+        statusBadge.classList.add("hidden");
+        const dataUrl = await readFileAsDataUrl(file);
+        state.pendingVideoUrl = dataUrl;
+        videoEl.src = dataUrl;
+      } else {
+        statusBadge.textContent = "Optimizing video for chat...";
+        statusBadge.classList.remove("hidden");
+        const dataUrl = await compressVideoBlobInBrowser(file);
+        statusBadge.classList.add("hidden");
+        state.pendingVideoUrl = dataUrl;
+        videoEl.src = dataUrl;
+      }
+      updateSendButtonState();
+      document.getElementById("composer-input").focus();
+    } catch (err) {
+      clearPendingVideo();
+      alert(err.message || "Could not attach video.");
+    }
+  }
+
+  function extractMediaFileFromClipboardData(clipboardData) {
     if (!clipboardData) return null;
     if (clipboardData.items) {
       for (let i = 0; i < clipboardData.items.length; i++) {
         const item = clipboardData.items[i];
-        if (item.type && item.type.startsWith("image/")) {
+        if (item.type && (item.type.startsWith("image/") || item.type.startsWith("video/"))) {
           const f = item.getAsFile();
           if (f) return f;
         }
@@ -1345,7 +1498,7 @@
     if (clipboardData.files && clipboardData.files.length > 0) {
       for (let i = 0; i < clipboardData.files.length; i++) {
         const f = clipboardData.files[i];
-        if (f.type && f.type.startsWith("image/")) {
+        if (f.type && (f.type.startsWith("image/") || f.type.startsWith("video/"))) {
           return f;
         }
       }
@@ -1363,6 +1516,7 @@
     const hasContent =
       input.value.trim().length > 0 ||
       Boolean(state.pendingAttachment) ||
+      Boolean(state.pendingVideoUrl) ||
       Boolean(state.pendingAudioUrl) ||
       Boolean(state.isRecordingAudio);
     sendBtn.disabled = !hasContent;
@@ -1381,16 +1535,18 @@
     const input = document.getElementById("composer-input");
     const text = input.value.trim();
     const attachment = state.pendingAttachment;
+    const videoUrl = state.pendingVideoUrl;
     const audioUrl = state.pendingAudioUrl;
     const audioDuration = state.pendingAudioDuration || 0;
 
-    if (!text && !attachment && !audioUrl) return;
+    if (!text && !attachment && !videoUrl && !audioUrl) return;
 
     const partner = getActivePartner();
 
     input.value = "";
     input.style.height = "auto";
     clearPendingAttachment();
+    clearPendingVideo();
     clearPendingAudio();
     updateSendButtonState();
 
@@ -1401,6 +1557,7 @@
       receiver_id: partner ? partner.id : null,
       content: text,
       image_url: attachment || null,
+      video_url: videoUrl || null,
       audio_url: audioUrl || null,
       audio_duration: audioDuration || null,
       reactions: {},
@@ -1514,6 +1671,24 @@
     document.getElementById("composer-attachment-preview").classList.add("hidden");
     document.getElementById("composer-attachment-img").src = "";
     document.getElementById("composer-image-input").value = "";
+    updateSendButtonState();
+  }
+
+  function clearPendingVideo() {
+    state.pendingVideoUrl = null;
+    const previewBox = document.getElementById("composer-video-preview");
+    const videoEl = document.getElementById("composer-attachment-video");
+    const statusBadge = document.getElementById("composer-video-status");
+    const videoInput = document.getElementById("composer-video-input");
+    if (videoEl) {
+      try {
+        videoEl.pause();
+      } catch (_) {}
+      videoEl.removeAttribute("src");
+    }
+    if (statusBadge) statusBadge.classList.add("hidden");
+    if (previewBox) previewBox.classList.add("hidden");
+    if (videoInput) videoInput.value = "";
     updateSendButtonState();
   }
 
@@ -1998,17 +2173,29 @@
       await attachImageFileToComposer(file);
     });
 
-    // Global & composer paste handler for images (Ctrl+V / Cmd+V / Right-click Paste)
+    // Attach video in chat
+    document.getElementById("composer-video-input").addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      await attachVideoFileToComposer(file);
+    });
+
+    // Global & composer paste handler for images and videos (Ctrl+V / Cmd+V / Right-click Paste)
     document.addEventListener("paste", async (e) => {
       if (!state.currentUser) return;
-      const imgFile = extractImageFileFromClipboardData(e.clipboardData);
-      if (!imgFile) return;
+      const mediaFile = extractMediaFileFromClipboardData(e.clipboardData);
+      if (!mediaFile) return;
 
       e.preventDefault();
+      if (mediaFile.type && mediaFile.type.startsWith("video/")) {
+        await attachVideoFileToComposer(mediaFile);
+        return;
+      }
+
       const editModal = document.getElementById("edit-profile-modal");
       if (editModal && !editModal.classList.contains("hidden")) {
         try {
-          const dataUrl = await compressImageFile(imgFile, 160, 0.85);
+          const dataUrl = await compressImageFile(mediaFile, 160, 0.85);
           state.editAvatarDataUrl = dataUrl;
           document.getElementById("edit-avatar-preview").src = dataUrl;
         } catch (err) {
@@ -2017,10 +2204,10 @@
         return;
       }
 
-      await attachImageFileToComposer(imgFile);
+      await attachImageFileToComposer(mediaFile);
     });
 
-    // Drag and drop images into chat
+    // Drag and drop images or videos into chat
     const composerBox = document.querySelector(".slack-composer");
     const mainChatArea = document.querySelector(".slack-main");
     if (mainChatArea && composerBox) {
@@ -2038,12 +2225,17 @@
       mainChatArea.addEventListener("drop", async (e) => {
         composerBox.classList.remove("drag-over");
         if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-        const file = Array.from(e.dataTransfer.files).find(
-          (f) => f.type && f.type.startsWith("image/")
-        );
-        if (file) {
+        const files = Array.from(e.dataTransfer.files);
+        const videoFile = files.find((f) => f.type && f.type.startsWith("video/"));
+        if (videoFile) {
           e.preventDefault();
-          await attachImageFileToComposer(file);
+          await attachVideoFileToComposer(videoFile);
+          return;
+        }
+        const imgFile = files.find((f) => f.type && f.type.startsWith("image/"));
+        if (imgFile) {
+          e.preventDefault();
+          await attachImageFileToComposer(imgFile);
         }
       });
     }
@@ -2051,6 +2243,10 @@
     document
       .getElementById("composer-attachment-remove")
       .addEventListener("click", clearPendingAttachment);
+
+    document
+      .getElementById("composer-video-remove")
+      .addEventListener("click", clearPendingVideo);
 
     // Voice recording controls
     document

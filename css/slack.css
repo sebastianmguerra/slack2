@@ -2222,3 +2222,45 @@ button, input, textarea {
 .msg-audio-speed-btn:hover {
   background: #eeeeee;
 }
+
+
+/* ============================================================================
+   10. VIDEO ATTACHMENTS IN COMPOSER & MESSAGES
+   ============================================================================ */
+.video-thumb-box {
+  width: auto;
+  height: auto;
+  max-width: 240px;
+}
+
+.attachment-video-thumb {
+  max-width: 220px;
+  max-height: 130px;
+  border-radius: 6px;
+  background: #000000;
+  display: block;
+}
+
+.video-status-badge {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #1264a3;
+}
+
+.msg-video-wrap {
+  margin-top: 6px;
+  max-width: 340px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #dddddd;
+  background: #000000;
+}
+
+.msg-attached-video {
+  width: 100%;
+  max-height: 360px;
+  display: block;
+  background: #000000;
+}

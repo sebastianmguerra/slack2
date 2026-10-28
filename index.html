@@ -267,6 +267,14 @@
               </div>
             </div>
 
+            <div id="composer-video-preview" class="composer-attachment-preview hidden">
+              <div class="attachment-thumb-box video-thumb-box">
+                <video id="composer-attachment-video" class="attachment-video-thumb" controls playsinline preload="metadata"></video>
+                <span id="composer-video-status" class="video-status-badge hidden">Optimizing video...</span>
+                <button type="button" id="composer-video-remove" class="attachment-remove-btn" title="Remove video">✕</button>
+              </div>
+            </div>
+
             <div id="composer-recording-bar" class="composer-recording-bar hidden">
               <div class="recording-status-left">
                 <span class="recording-pulse-dot"></span>
@@ -302,6 +310,14 @@
                   </svg>
                 </label>
                 <input type="file" id="composer-image-input" accept="image/*" class="hidden" />
+
+                <label class="composer-icon-btn" for="composer-video-input" title="Attach video">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                  </svg>
+                </label>
+                <input type="file" id="composer-video-input" accept="video/*" class="hidden" />
 
                 <button type="button" id="btn-record-audio" class="composer-icon-btn" title="Record voice message">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
