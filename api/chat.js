@@ -113,8 +113,29 @@ function mergeClientSnapshot(store, snapshot) {
       const createdMs = new Date(m.created_at).getTime() || 0;
       if (createdMs <= (store.clearedAt || 0) || createdMs <= (store.resetAt || 0)) continue;
       const existing = byId.get(m.id);
-      if (!existing || (m.updated_at || 0) > (existing.updated_at || 0)) {
+      if (!existing) {
         byId.set(m.id, m);
+        modified = true;
+      } else if ((m.updated_at || 0) > (existing.updated_at || 0)) {
+        byId.set(m.id, {
+          ...existing,
+          ...m,
+          image_url: m.image_url || existing.image_url || null,
+          video_url: m.video_url || existing.video_url || null,
+          audio_url: m.audio_url || existing.audio_url || null
+        });
+        modified = true;
+      } else if (
+        (!existing.image_url && m.image_url) ||
+        (!existing.video_url && m.video_url) ||
+        (!existing.audio_url && m.audio_url)
+      ) {
+        byId.set(m.id, {
+          ...existing,
+          image_url: existing.image_url || m.image_url || null,
+          video_url: existing.video_url || m.video_url || null,
+          audio_url: existing.audio_url || m.audio_url || null
+        });
         modified = true;
       }
     }
@@ -124,6 +145,65 @@ function mergeClientSnapshot(store, snapshot) {
   }
 
   return modified;
+}
+
+function buildDeltaResponse(store, clientMeta) {
+  const knownIdsSet = new Set(
+    clientMeta && Array.isArray(clientMeta.knownMessageIds) ? clientMeta.knownMessageIds : []
+  );
+  const sinceMs = (clientMeta && Number(clientMeta.sinceUpdatedAt)) || 0;
+  const knownUserUpdated =
+    (clientMeta && typeof clientMeta.userUpdatedMap === "object" && clientMeta.userUpdatedMap) ||
+    {};
+
+  // Only send full avatar_url if the user profile changed since client's known updated_at
+  const deltaUsers = Object.values(store.users).map((u) => {
+    const clientKnownTs = Number(knownUserUpdated[u.id]) || 0;
+    if (clientKnownTs > 0 && (u.updated_at || 0) <= clientKnownTs) {
+      return {
+        id: u.id,
+        username: u.username,
+        display_name: u.display_name,
+        status_text: u.status_text,
+        updated_at: u.updated_at,
+        last_seen: u.last_seen
+      };
+    }
+    return u;
+  });
+
+  // Only send messages that the client doesn't have yet, OR lightweight reaction updates
+  const deltaMessages = [];
+  for (const m of store.messages) {
+    if (!knownIdsSet.has(m.id)) {
+      deltaMessages.push(m);
+    } else if ((m.updated_at || 0) > sinceMs) {
+      // Client already has this message's media; only send updated reactions & metadata
+      deltaMessages.push({
+        id: m.id,
+        sender_id: m.sender_id,
+        receiver_id: m.receiver_id,
+        content: m.content,
+        reactions: m.reactions || {},
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        _lightDelta: true
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    epoch: CURRENT_EPOCH,
+    resetAt: store.resetAt || 0,
+    clearedAt: store.clearedAt || 0,
+    deletedIds: store.deletedIds || [],
+    serverUserCount: Object.keys(store.users).length,
+    serverMessageCount: store.messages.length,
+    users: deltaUsers,
+    messages: deltaMessages,
+    typing: store.typing
+  };
 }
 
 module.exports = async (req, res) => {
@@ -148,16 +228,7 @@ module.exports = async (req, res) => {
   }
 
   if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      epoch: CURRENT_EPOCH,
-      resetAt: store.resetAt || 0,
-      clearedAt: store.clearedAt || 0,
-      deletedIds: store.deletedIds || [],
-      users: Object.values(store.users),
-      messages: store.messages,
-      typing: store.typing
-    });
+    return res.status(200).json(buildDeltaResponse(store, null));
   }
 
   if (req.method === "POST") {
@@ -171,23 +242,14 @@ module.exports = async (req, res) => {
     }
     body = body || {};
 
-    const { action, activeUserId, snapshot } = body;
+    const { action, activeUserId, snapshot, clientMeta } = body;
 
     if (action === "reset_all") {
       const fresh = getDefaultStore();
       fresh.resetAt = now;
       fresh.clearedAt = now;
       saveStore(fresh);
-      return res.status(200).json({
-        ok: true,
-        epoch: CURRENT_EPOCH,
-        resetAt: fresh.resetAt,
-        clearedAt: fresh.clearedAt,
-        deletedIds: [],
-        users: [],
-        messages: [],
-        typing: {}
-      });
+      return res.status(200).json(buildDeltaResponse(fresh, null));
     }
 
     let modified = false;
@@ -323,16 +385,7 @@ module.exports = async (req, res) => {
       saveStore(store);
     }
 
-    return res.status(200).json({
-      ok: true,
-      epoch: CURRENT_EPOCH,
-      resetAt: store.resetAt || 0,
-      clearedAt: store.clearedAt || 0,
-      deletedIds: store.deletedIds || [],
-      users: Object.values(store.users),
-      messages: store.messages,
-      typing: store.typing
-    });
+    return res.status(200).json(buildDeltaResponse(store, clientMeta));
   }
 
   return res.status(405).json({ error: "Method not allowed" });

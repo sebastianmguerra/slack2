@@ -414,11 +414,13 @@
       if (!u || !u.id || !u.username) continue;
       const cur = state.store.users[u.id];
       if (!cur || (u.updated_at || 0) >= (cur.updated_at || 0)) {
+        const mergedAvatar = u.avatar_url || (cur && cur.avatar_url) || "";
+        const mergedPassHash = u.password_hash || (cur && cur.password_hash) || "";
         if (
           !cur ||
           cur.display_name !== u.display_name ||
           cur.username !== u.username ||
-          cur.avatar_url !== u.avatar_url ||
+          cur.avatar_url !== mergedAvatar ||
           cur.status_text !== u.status_text
         ) {
           messagesOrProfilesChanged = true;
@@ -427,7 +429,9 @@
         }
         state.store.users[u.id] = {
           ...(cur || {}),
-          ...u
+          ...u,
+          avatar_url: mergedAvatar,
+          password_hash: mergedPassHash
         };
       }
     }
@@ -507,12 +511,36 @@
     }
   }
 
+  function buildClientMeta() {
+    const knownMessageIds = [];
+    let sinceUpdatedAt = 0;
+    for (const m of state.store.messages) {
+      if (!m || !m.id) continue;
+      knownMessageIds.push(m.id);
+      if ((m.updated_at || 0) > sinceUpdatedAt) {
+        sinceUpdatedAt = m.updated_at;
+      }
+    }
+    const userUpdatedMap = {};
+    for (const u of Object.values(state.store.users)) {
+      if (u && u.id && u.avatar_url) {
+        userUpdatedMap[u.id] = u.updated_at || 0;
+      }
+    }
+    return {
+      knownMessageIds,
+      sinceUpdatedAt,
+      userUpdatedMap
+    };
+  }
+
   async function callVercelApi(payload, includeSnapshot = false) {
     if (window.location.protocol === "file:") return { ok: true, localOnly: true };
     try {
       const bodyObj = {
         ...payload,
-        activeUserId: state.currentUser ? state.currentUser.id : null
+        activeUserId: state.currentUser ? state.currentUser.id : null,
+        clientMeta: buildClientMeta()
       };
       if (includeSnapshot) {
         bodyObj.snapshot = getSafeSnapshotForVercel();
@@ -524,9 +552,15 @@
       });
       const data = await res.json();
       if (data && data.ok) {
-        const serverUserCount = Array.isArray(data.users) ? data.users.length : 0;
+        const serverUserCount =
+          typeof data.serverUserCount === "number"
+            ? data.serverUserCount
+            : Array.isArray(data.users)
+            ? data.users.length
+            : 0;
         const localUserCount = Object.keys(state.store.users).length;
-        const serverMsgCount = Array.isArray(data.messages) ? data.messages.length : 0;
+        const serverMsgCount =
+          typeof data.serverMessageCount === "number" ? data.serverMessageCount : 0;
         const localMsgCount = state.store.messages.length;
 
         const changed = applyIncomingState(data);
@@ -535,9 +569,15 @@
           renderAll(true);
         }
 
-        // If Vercel instance cold-started and has fewer users/messages than our IndexedDB, re-hydrate it
-        if (!includeSnapshot && (serverUserCount < localUserCount || serverMsgCount < localMsgCount)) {
-          await callVercelApi({ action: "sync" }, true);
+        // Only re-hydrate if the Vercel instance cold-started (with a 15s cooldown so it never stalls polling)
+        const now = Date.now();
+        if (
+          !includeSnapshot &&
+          now - (state.lastRehydrateAt || 0) > 15000 &&
+          (serverUserCount < localUserCount || (serverMsgCount === 0 && localMsgCount > 0))
+        ) {
+          state.lastRehydrateAt = now;
+          callVercelApi({ action: "sync" }, true);
         }
       }
       return data;
@@ -565,6 +605,12 @@
       };
     }
 
+    window.addEventListener("focus", () => {
+      if (state.currentUser && !state.syncInFlight) {
+        callVercelApi({ action: "sync" }, false);
+      }
+    });
+
     if (state.pollTimer) clearInterval(state.pollTimer);
     state.pollTimer = setInterval(async () => {
       if (document.hidden || state.syncInFlight || !state.currentUser) return;
@@ -574,7 +620,7 @@
       } finally {
         state.syncInFlight = false;
       }
-    }, 1300);
+    }, 800);
   }
 
   function sendTypingSignal() {
