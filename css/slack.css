@@ -2024,3 +2024,201 @@ button, input, textarea {
   border-color: #1264a3;
   box-shadow: 0 0 0 3px rgba(18, 100, 163, 0.22);
 }
+
+
+/* ============================================================================
+   9. VOICE RECORDING & SLACK AUDIO MESSAGE CARDS
+   ============================================================================ */
+.composer-icon-btn.recording-active {
+  color: #e01e5a;
+  background: rgba(224, 30, 90, 0.12);
+}
+
+.composer-recording-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  margin: 6px 10px 0;
+  background: #fdf2f4;
+  border: 1px solid #f5c2cf;
+  border-radius: 8px;
+}
+
+.recording-status-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1d1c1d;
+}
+
+.recording-pulse-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e01e5a;
+  animation: slackRecPulse 1.1s infinite ease-in-out;
+}
+
+@keyframes slackRecPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.28); opacity: 0.45; }
+}
+
+.recording-timer-text {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: #e01e5a;
+  font-size: 12.5px;
+}
+
+.recording-label-text {
+  font-size: 12.5px;
+  color: #616061;
+}
+
+.recording-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.recording-cancel-btn {
+  border: 1px solid #d4d4d4;
+  background: #ffffff;
+  color: #616061;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.recording-cancel-btn:hover {
+  background: #f2f2f2;
+  color: #1d1c1d;
+}
+
+.recording-done-btn {
+  border: none;
+  background: #e01e5a;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.recording-done-btn:hover {
+  background: #c4164c;
+}
+
+.composer-audio-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin: 6px 10px 0;
+  background: #f8f8f8;
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+}
+
+.audio-preview-icon {
+  font-size: 15px;
+}
+
+.composer-audio-el {
+  height: 30px;
+  flex: 1;
+  max-width: 280px;
+}
+
+.audio-remove-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid #d0d0d0;
+  background: #ffffff;
+  color: #616061;
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.audio-remove-btn:hover {
+  background: #e01e5a;
+  color: #ffffff;
+  border-color: #e01e5a;
+}
+
+/* Slack Audio Clip Bubble inside Messages */
+.msg-audio-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #f8f8f8;
+  border: 1px solid #dddddd;
+  border-radius: 10px;
+  min-width: 250px;
+  max-width: 340px;
+}
+
+.msg-audio-play-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: #1264a3;
+  color: #ffffff;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, transform 0.1s;
+}
+
+.msg-audio-play-btn:hover {
+  background: #0b4c8c;
+  transform: scale(1.04);
+}
+
+.msg-audio-slider {
+  flex: 1;
+  accent-color: #1264a3;
+  height: 4px;
+  cursor: pointer;
+  min-width: 90px;
+}
+
+.msg-audio-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: #616061;
+  min-width: 34px;
+  text-align: right;
+}
+
+.msg-audio-speed-btn {
+  border: 1px solid #d0d0d0;
+  background: #ffffff;
+  color: #1d1c1d;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.msg-audio-speed-btn:hover {
+  background: #eeeeee;
+}

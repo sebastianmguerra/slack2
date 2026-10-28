@@ -267,6 +267,24 @@
               </div>
             </div>
 
+            <div id="composer-recording-bar" class="composer-recording-bar hidden">
+              <div class="recording-status-left">
+                <span class="recording-pulse-dot"></span>
+                <span id="recording-timer-text" class="recording-timer-text">0:00</span>
+                <span class="recording-label-text">Recording voice clip...</span>
+              </div>
+              <div class="recording-actions-right">
+                <button type="button" id="btn-cancel-recording" class="recording-cancel-btn" title="Discard recording">Cancel</button>
+                <button type="button" id="btn-stop-recording" class="recording-done-btn" title="Stop and attach">⏹ Done</button>
+              </div>
+            </div>
+
+            <div id="composer-audio-preview" class="composer-audio-preview hidden">
+              <span class="audio-preview-icon">🎤</span>
+              <audio id="composer-audio-player" controls preload="metadata" class="composer-audio-el"></audio>
+              <button type="button" id="composer-audio-remove" class="audio-remove-btn" title="Remove voice clip">✕</button>
+            </div>
+
             <textarea
               id="composer-input"
               class="composer-textarea"
@@ -284,6 +302,15 @@
                   </svg>
                 </label>
                 <input type="file" id="composer-image-input" accept="image/*" class="hidden" />
+
+                <button type="button" id="btn-record-audio" class="composer-icon-btn" title="Record voice message">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                  </svg>
+                </button>
 
                 <button type="button" id="btn-emoji-picker" class="composer-icon-btn" title="Insert emoji">
                   😊

@@ -327,6 +327,15 @@
 
     searchQuery: "",
     pendingAttachment: null,
+    pendingAudioUrl: null,
+    pendingAudioDuration: 0,
+    isRecordingAudio: false,
+    mediaRecorder: null,
+    recordingStream: null,
+    recordingChunks: [],
+    recordingStartedAt: 0,
+    recordingTimerInterval: null,
+    sendImmediatelyOnStop: false,
     drawerOpen: false,
     drawerUserId: null,
     editAvatarDataUrl: "",
@@ -352,8 +361,8 @@
         selectedMsgs.unshift(m);
         bytes += msgSize;
       } else {
-        // Include message text without heavy image if needed
-        const lightMsg = { ...m, image_url: null };
+        // Include message text without heavy media if needed
+        const lightMsg = { ...m, image_url: null, audio_url: null };
         selectedMsgs.unshift(lightMsg);
         bytes += JSON.stringify(lightMsg).length;
       }
@@ -441,10 +450,12 @@
           if (JSON.stringify(existing.reactions) !== JSON.stringify(m.reactions)) {
             changed = true;
           }
-          // Preserve local image if server had stripped it
+          // Preserve local media if server had stripped it
           byId.set(m.id, {
             ...m,
-            image_url: m.image_url || existing.image_url
+            image_url: m.image_url || existing.image_url,
+            audio_url: m.audio_url || existing.audio_url,
+            audio_duration: m.audio_duration || existing.audio_duration
           });
         }
       }
@@ -1047,6 +1058,16 @@
            </div>`
         : "";
 
+      const attachedAudioHtml = msg.audio_url
+        ? `<div class="msg-audio-card" data-audio-card="${escapeHtml(msg.id)}">
+             <button type="button" class="msg-audio-play-btn" title="Play / Pause voice clip">▶</button>
+             <input type="range" class="msg-audio-slider" min="0" max="100" value="0" step="0.5" />
+             <span class="msg-audio-time">${escapeHtml(formatAudioSeconds(msg.audio_duration || 0))}</span>
+             <button type="button" class="msg-audio-speed-btn" title="Change playback speed">1x</button>
+             <audio preload="metadata" src="${escapeHtml(msg.audio_url)}" class="hidden"></audio>
+           </div>`
+        : "";
+
       html += `
         <div class="slack-msg-row ${isCompact ? "compact" : ""}" data-msgid="${escapeHtml(msg.id)}">
           <div class="msg-left-gutter">
@@ -1071,6 +1092,7 @@
             }
             <div class="msg-text">${formatSlackText(msg.content)}</div>
             ${attachedImgHtml}
+            ${attachedAudioHtml}
             ${reactionsHtml}
           </div>
 
@@ -1122,9 +1144,86 @@
       });
     });
 
+    bindAudioCardPlayers(viewport);
+
     if (!preserveScrollIfNotBottom || wasNearBottom) {
       viewport.scrollTop = viewport.scrollHeight;
     }
+  }
+
+  function formatAudioSeconds(sec) {
+    const total = Math.max(0, Math.round(Number(sec) || 0));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function bindAudioCardPlayers(viewport) {
+    viewport.querySelectorAll("[data-audio-card]").forEach((card) => {
+      const playBtn = card.querySelector(".msg-audio-play-btn");
+      const slider = card.querySelector(".msg-audio-slider");
+      const timeLabel = card.querySelector(".msg-audio-time");
+      const speedBtn = card.querySelector(".msg-audio-speed-btn");
+      const audioEl = card.querySelector("audio");
+      if (!playBtn || !slider || !timeLabel || !speedBtn || !audioEl) return;
+
+      audioEl.addEventListener("loadedmetadata", () => {
+        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+          timeLabel.textContent = formatAudioSeconds(audioEl.duration);
+        }
+      });
+
+      playBtn.addEventListener("click", () => {
+        if (audioEl.paused) {
+          // Pause any other audio clips in viewport
+          viewport.querySelectorAll("audio").forEach((other) => {
+            if (other !== audioEl) {
+              other.pause();
+            }
+          });
+          audioEl.play().catch(() => {});
+        } else {
+          audioEl.pause();
+        }
+      });
+
+      audioEl.addEventListener("play", () => {
+        playBtn.textContent = "⏸";
+      });
+
+      audioEl.addEventListener("pause", () => {
+        playBtn.textContent = "▶";
+      });
+
+      audioEl.addEventListener("timeupdate", () => {
+        const dur = isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 1;
+        slider.value = String(Math.min(100, (audioEl.currentTime / dur) * 100));
+        timeLabel.textContent = formatAudioSeconds(audioEl.currentTime);
+      });
+
+      audioEl.addEventListener("ended", () => {
+        playBtn.textContent = "▶";
+        slider.value = "0";
+        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+          timeLabel.textContent = formatAudioSeconds(audioEl.duration);
+        }
+      });
+
+      slider.addEventListener("input", () => {
+        if (isFinite(audioEl.duration) && audioEl.duration > 0) {
+          audioEl.currentTime = (Number(slider.value) / 100) * audioEl.duration;
+        }
+      });
+
+      const speeds = [1, 1.5, 2];
+      speedBtn.addEventListener("click", () => {
+        const currentRate = audioEl.playbackRate || 1;
+        const nextIdx = (speeds.indexOf(currentRate) + 1) % speeds.length;
+        const nextRate = speeds[nextIdx];
+        audioEl.playbackRate = nextRate;
+        speedBtn.textContent = `${nextRate}x`;
+      });
+    });
   }
 
   async function copyImageToClipboard(imgSrc, btnEl) {
@@ -1225,23 +1324,38 @@
   function updateSendButtonState() {
     const input = document.getElementById("composer-input");
     const sendBtn = document.getElementById("btn-send-message");
-    const hasContent = input.value.trim().length > 0 || Boolean(state.pendingAttachment);
+    const hasContent =
+      input.value.trim().length > 0 ||
+      Boolean(state.pendingAttachment) ||
+      Boolean(state.pendingAudioUrl) ||
+      Boolean(state.isRecordingAudio);
     sendBtn.disabled = !hasContent;
   }
 
   async function handleSendMessage() {
     if (!state.currentUser) return;
+
+    // If user clicks Send while actively recording, stop recording and auto-send
+    if (state.isRecordingAudio) {
+      state.sendImmediatelyOnStop = true;
+      stopVoiceRecording();
+      return;
+    }
+
     const input = document.getElementById("composer-input");
     const text = input.value.trim();
     const attachment = state.pendingAttachment;
+    const audioUrl = state.pendingAudioUrl;
+    const audioDuration = state.pendingAudioDuration || 0;
 
-    if (!text && !attachment) return;
+    if (!text && !attachment && !audioUrl) return;
 
     const partner = getActivePartner();
 
     input.value = "";
     input.style.height = "auto";
     clearPendingAttachment();
+    clearPendingAudio();
     updateSendButtonState();
 
     const now = Date.now();
@@ -1251,6 +1365,8 @@
       receiver_id: partner ? partner.id : null,
       content: text,
       image_url: attachment || null,
+      audio_url: audioUrl || null,
+      audio_duration: audioDuration || null,
       reactions: {},
       created_at: new Date(now).toISOString(),
       updated_at: now
@@ -1363,6 +1479,165 @@
     document.getElementById("composer-attachment-img").src = "";
     document.getElementById("composer-image-input").value = "";
     updateSendButtonState();
+  }
+
+  function clearPendingAudio() {
+    state.pendingAudioUrl = null;
+    state.pendingAudioDuration = 0;
+    const previewBar = document.getElementById("composer-audio-preview");
+    const audioEl = document.getElementById("composer-audio-player");
+    if (audioEl) {
+      try {
+        audioEl.pause();
+      } catch (_) {}
+      audioEl.removeAttribute("src");
+    }
+    if (previewBar) {
+      previewBar.classList.add("hidden");
+    }
+    updateSendButtonState();
+  }
+
+  function pickSupportedAudioMimeType() {
+    if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus"
+    ];
+    for (const mime of candidates) {
+      if (MediaRecorder.isTypeSupported(mime)) return mime;
+    }
+    return "";
+  }
+
+  function cleanupRecordingTracks() {
+    if (state.recordingTimerInterval) {
+      clearInterval(state.recordingTimerInterval);
+      state.recordingTimerInterval = null;
+    }
+    if (state.recordingStream) {
+      state.recordingStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+      state.recordingStream = null;
+    }
+    state.isRecordingAudio = false;
+    state.mediaRecorder = null;
+    document.getElementById("composer-recording-bar").classList.add("hidden");
+    document.getElementById("btn-record-audio").classList.remove("recording-active");
+    updateSendButtonState();
+  }
+
+  async function startVoiceRecording() {
+    if (state.isRecordingAudio) {
+      stopVoiceRecording();
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert("Your browser does not support voice recording.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      clearPendingAudio();
+
+      state.recordingStream = stream;
+      state.recordingChunks = [];
+      state.isRecordingAudio = true;
+      state.sendImmediatelyOnStop = false;
+      state.recordingStartedAt = Date.now();
+
+      const mimeType = pickSupportedAudioMimeType();
+      const options = { audioBitsPerSecond: 24000 };
+      if (mimeType) options.mimeType = mimeType;
+
+      const recorder = new MediaRecorder(stream, options);
+      state.mediaRecorder = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          state.recordingChunks.push(e.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const durationSec = Math.max(1, Math.round((Date.now() - state.recordingStartedAt) / 1000));
+        const chunks = state.recordingChunks.slice();
+        const shouldSendNow = state.sendImmediatelyOnStop;
+        cleanupRecordingTracks();
+
+        if (chunks.length === 0) return;
+
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const reader = new FileReader();
+        reader.onload = async (ev) => {
+          const dataUrl = ev.target.result;
+          state.pendingAudioUrl = dataUrl;
+          state.pendingAudioDuration = durationSec;
+
+          if (shouldSendNow) {
+            await handleSendMessage();
+          } else {
+            const audioEl = document.getElementById("composer-audio-player");
+            const previewBar = document.getElementById("composer-audio-preview");
+            audioEl.src = dataUrl;
+            previewBar.classList.remove("hidden");
+            updateSendButtonState();
+            document.getElementById("composer-input").focus();
+          }
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      recorder.start(250);
+
+      document.getElementById("btn-record-audio").classList.add("recording-active");
+      document.getElementById("recording-timer-text").textContent = "0:00";
+      document.getElementById("composer-recording-bar").classList.remove("hidden");
+      updateSendButtonState();
+
+      state.recordingTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - state.recordingStartedAt) / 1000);
+        document.getElementById("recording-timer-text").textContent = formatAudioSeconds(elapsed);
+        if (elapsed >= 60) {
+          stopVoiceRecording();
+        }
+      }, 400);
+    } catch (_) {
+      alert("Microphone access was denied or unavailable.");
+      cleanupRecordingTracks();
+    }
+  }
+
+  function stopVoiceRecording() {
+    if (!state.isRecordingAudio || !state.mediaRecorder) return;
+    try {
+      if (state.mediaRecorder.state !== "inactive") {
+        state.mediaRecorder.stop();
+      }
+    } catch (_) {
+      cleanupRecordingTracks();
+    }
+  }
+
+  function cancelVoiceRecording() {
+    state.recordingChunks = [];
+    state.sendImmediatelyOnStop = false;
+    if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
+      try {
+        state.mediaRecorder.onstop = () => cleanupRecordingTracks();
+        state.mediaRecorder.stop();
+      } catch (_) {
+        cleanupRecordingTracks();
+      }
+    } else {
+      cleanupRecordingTracks();
+    }
   }
 
   // ==========================================================================
@@ -1740,6 +2015,23 @@
     document
       .getElementById("composer-attachment-remove")
       .addEventListener("click", clearPendingAttachment);
+
+    // Voice recording controls
+    document
+      .getElementById("btn-record-audio")
+      .addEventListener("click", startVoiceRecording);
+    document
+      .getElementById("btn-stop-recording")
+      .addEventListener("click", () => {
+        state.sendImmediatelyOnStop = false;
+        stopVoiceRecording();
+      });
+    document
+      .getElementById("btn-cancel-recording")
+      .addEventListener("click", cancelVoiceRecording);
+    document
+      .getElementById("composer-audio-remove")
+      .addEventListener("click", clearPendingAudio);
 
     // Emoji picker
     const emojiBtn = document.getElementById("btn-emoji-picker");
